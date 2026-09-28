@@ -17,6 +17,7 @@
       {% if files %}<button id="allbtn" type="button" title="Shift+Tab">Collapse all</button>{% endif %}
       {% if reviewing %}<button id="finish" type="button" class="primary">Finish review <span id="rvcount"></span></button>{% endif %}
     </div>
+    {% if nnotes_total %}<div class="notenav"><span>✎ {{ nnotes_total }} agent note{% if nnotes_total != 1 %}s{% endif %}</span><button id="noteprev" type="button" title="Previous agent note (A)">‹ Prev</button><button id="notenext" type="button" title="Next agent note (a)">Next ›</button></div>{% endif %}
     {% if reviewing %}<div class="rvnote">Reviewing <b>{{ branch }}</b> · click a line number to comment; drag or Shift-click for a block</div>{% endif %}
   </div>
   <input id="filter" type="search" placeholder="Filter files  /" autocomplete="off" spellcheck="false">
@@ -33,10 +34,11 @@
   {% endif %}
   <nav id="tree">
     {% for f in files %}
-    {% if loop.first or loop.previtem.dir != f.dir %}<div class="dir"><bdi dir="ltr">{{ f.dir or "./" }}</bdi></div>{% endif %}
-    <a class="fi" href="#f{{ f.i }}" data-i="{{ f.i }}" title="{{ f.path }}">
+    {% if f.tier_head %}<div class="tier tier-{{ f.tier }}">{{ f.tier_head }}</div>{% endif %}
+    {% if f.tier_head or loop.first or loop.previtem.dir != f.dir %}<div class="dir"><bdi dir="ltr">{{ f.dir or "./" }}</bdi></div>{% endif %}
+    <a class="fi{% if f.tier == "check" %} flag{% endif %}" href="#f{{ f.i }}" data-i="{{ f.i }}" title="{{ f.path }}">
       <span class="vs vs-{{ f.viewed }}"></span>
-      <span class="nm st-{{ f.status }}">{{ f.name }}</span>
+      <span class="nmw"><span class="nm st-{{ f.status }}">{{ f.name }}</span>{% if f.nnotes %}<span class="an" title="{{ f.nnotes }} agent note{% if f.nnotes != 1 %}s{% endif %}">✎{{ f.nnotes }}</span>{% endif %}</span>
       <span class="cnt">{% if f.add %}<span class="add">+{{ f.add }}</span>{% endif %}{% if f.del %} <span class="del">−{{ f.del }}</span>{% endif %}</span>
       <span class="bar"><i class="ba"></i><i class="bd"></i></span>
     </a>
@@ -45,6 +47,13 @@
 </aside>
 
 <main id="main">
+  {% if intro or stray %}
+  <details id="intro" open>
+    <summary>Notes from the agent</summary>
+    {% if intro %}<div class="inote" data-note="(intro)"><div class="ib">{{ intro }}</div>{% if reviewing %}<div class="ibtns"><button type="button" data-act="reply">Reply</button></div>{% endif %}</div>{% endif %}
+    {% for s in stray %}<div class="is inote" data-note="{{ s.heading }}"><div class="ih">{{ s.heading }}</div>{% if s.body %}<div class="ib">{{ s.body }}</div>{% endif %}{% if reviewing %}<div class="ibtns"><button type="button" data-act="reply">Reply</button></div>{% endif %}</div>{% endfor %}
+  </details>
+  {% endif %}
   {% if not files %}<div class="empty">No changes.</div>{% endif %}
   {% for f in files %}
   <section class="file" id="f{{ f.i }}" data-i="{{ f.i }}" style="--gd:{{ f.gd }}">
@@ -52,6 +61,7 @@
       <button class="tw" tabindex="-1" aria-label="Collapse or expand">▾</button>
       <span class="st st-{{ f.status }}">{{ f.status }}</span>
       <span class="path">{% if f.dir %}<span class="pd">{{ f.dir }}/</span>{% endif %}<b>{{ f.name }}</b>{% if f.old_path %} <span class="from">← {{ f.old_path }}</span>{% endif %}</span>
+      {% if f.why %}<span class="why why-{{ f.tier }}">{{ f.why }}</span>{% endif %}
       <span class="cnt"><span class="add">+{{ f.add }}</span> <span class="del">−{{ f.del }}</span></span>
       <label class="vw"><input type="checkbox" tabindex="-1"{% if f.viewed == "v" %} checked{% endif %}> Viewed</label>
     </header>
@@ -68,6 +78,7 @@
       <tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>next / prev hunk</td></tr>
       <tr><td><kbd>J</kbd> <kbd>K</kbd></td><td>next / prev file</td></tr>
       <tr><td><kbd>n</kbd> <kbd>N</kbd></td><td>next / prev unviewed file</td></tr>
+      <tr><td><kbd>a</kbd> <kbd>A</kbd></td><td>next / prev agent note</td></tr>
       <tr><td><kbd>v</kbd></td><td>toggle viewed (collapses the file)</td></tr>
       <tr><td><kbd>V</kbd></td><td>mark viewed, go to next unviewed</td></tr>
       <tr><td><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></td><td>current file: collapsed / hunk headers / everything</td></tr>

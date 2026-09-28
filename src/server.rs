@@ -3,9 +3,11 @@
 use crate::config::Config;
 use crate::diff::{self, DiffOpts, FileDiff};
 use crate::git::Git;
+use crate::notes::Notes;
 use crate::render::{self, escape};
 use crate::store::Store;
 use crate::target::{self, Commit, Target};
+use crate::triage::{self, Triage};
 use anyhow::Result;
 use axum::{
     Json, Router,
@@ -18,6 +20,7 @@ use axum::{
 use rust_embed::Embed;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
@@ -29,7 +32,10 @@ struct Assets;
 pub struct Snapshot {
     pub generation: u64,
     pub label: String,
+    /// In review order (see triage), with each file's tier alongside.
     pub files: Vec<FileDiff>,
+    pub triage: Vec<Triage>,
+    pub notes: Arc<Notes>,
     /// Commits of the whole target (views keep the full list for navigation).
     pub commits: Vec<Commit>,
     /// Diff head: a commit, or the working-tree snapshot tree.
@@ -53,6 +59,8 @@ pub struct App {
     pub target: Target,
     pub base_override: Option<String>,
     pub full: bool,
+    /// Where the agent notes came from, re-read on re-snapshot ("-" is stdin).
+    pub notes_src: Option<PathBuf>,
     pub token: String,
     pub port: u16,
     pub snap: RwLock<Arc<Snapshot>>,
@@ -75,9 +83,11 @@ pub fn build_snapshot(
     cfg: &Config,
     t: &Target,
     base_override: Option<&str>,
+    notes: Arc<Notes>,
 ) -> Result<Snapshot> {
     let r = target::resolve(t, git, base_override)?;
-    let files = diff::diff(git, &r.base, &r.head, &diff_opts(cfg))?;
+    let mut files = diff::diff(git, &r.base, &r.head, &diff_opts(cfg))?;
+    let triage = triage::arrange(&mut files, &notes, cfg);
     let uncommitted = r.worktree && git.rev("HEAD^{tree}").as_deref() != Some(r.head.as_str());
     let head_commit = if r.worktree {
         git.commit("HEAD")
@@ -88,6 +98,8 @@ pub fn build_snapshot(
         generation: GENERATION.fetch_add(1, Ordering::Relaxed),
         label: r.label,
         files,
+        triage,
+        notes,
         commits: r.commits,
         head: r.head,
         uncommitted,
@@ -96,6 +108,54 @@ pub fn build_snapshot(
         branch: r.branch,
         head_commit,
     })
+}
+
+impl Snapshot {
+    /// Re-classify and re-sort with new agent notes.
+    pub fn set_notes(&mut self, notes: Arc<Notes>, cfg: &Config) {
+        self.triage = triage::arrange(&mut self.files, &notes, cfg);
+        self.notes = notes;
+    }
+
+    /// Notes that won't show where the agent meant them to, for its stderr.
+    pub fn note_warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for n in &self.notes.notes {
+            let Some(f) = self.files.iter().find(|f| f.path == n.path) else {
+                if n.path.contains(['/', '.']) && !n.path.contains(' ') {
+                    out.push(format!(
+                        "note \"{}\": no such file in this diff; shown with the intro",
+                        n.heading
+                    ));
+                }
+                continue;
+            };
+            let touched = f
+                .hunks
+                .iter()
+                .flat_map(|h| &h.lines)
+                .any(|l| l.kind != diff::Kind::Del && (n.a..=n.b).contains(&l.new_no));
+            if n.a > 0 && !touched {
+                out.push(format!(
+                    "note \"{}\": lines not in the diff; shown at the top of the file",
+                    n.heading
+                ));
+            }
+        }
+        out
+    }
+}
+
+/// Agent notes from a file, or stdin for "-".
+pub fn read_notes(src: &std::path::Path) -> Result<String> {
+    use anyhow::Context;
+    if src.as_os_str() == "-" {
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)
+            .context("reading notes from stdin")?;
+        return Ok(s);
+    }
+    std::fs::read_to_string(src).with_context(|| format!("reading notes {}", src.display()))
 }
 
 fn diff_opts(cfg: &Config) -> DiffOpts {
@@ -114,6 +174,7 @@ impl App {
         target: Target,
         base_override: Option<String>,
         full: bool,
+        notes_src: Option<PathBuf>,
         token: String,
         port: u16,
         snap: Snapshot,
@@ -126,6 +187,7 @@ impl App {
             target,
             base_override,
             full,
+            notes_src,
             token,
             port,
             snap: RwLock::new(Arc::new(snap)),
@@ -181,11 +243,14 @@ impl App {
             let base = target::parent_or_empty(&self.git, &c.sha)?;
             (base, c.sha.clone(), format!("{} {}", c.short, c.subject))
         };
-        let files = diff::diff(&self.git, &base, &head, &diff_opts(&self.cfg))?;
+        let mut files = diff::diff(&self.git, &base, &head, &diff_opts(&self.cfg))?;
+        let triage = triage::arrange(&mut files, &main.notes, &self.cfg);
         let snap = Arc::new(Snapshot {
             generation: GENERATION.fetch_add(1, Ordering::Relaxed),
             label,
             files,
+            triage,
+            notes: main.notes.clone(),
             commits: main.commits.clone(),
             head,
             uncommitted: main.uncommitted,
@@ -355,10 +420,18 @@ fn render_shell(app: &App, view: &str) -> Result<String> {
     let snap = app.view(view)?;
     let tw = app.cfg.tab_width;
     let mut mfiles = Vec::with_capacity(snap.files.len());
-    for f in &snap.files {
+    for (f, t) in snap.files.iter().zip(&snap.triage) {
         let v = app.store.state(&f.path, &f.new_blob)?;
-        mfiles.push(render::model_file(f, v.code(), tw));
+        let mut m = render::model_file(f, v.code(), tw);
+        m.tier = t.tier.key();
+        mfiles.push(m);
     }
+    // Notes on files in this view go inline; the rest show with the intro.
+    let (notes, stray): (Vec<_>, Vec<_>) = snap
+        .notes
+        .notes
+        .iter()
+        .partition(|n| snap.files.iter().any(|f| f.path == n.path));
     let total: u32 = snap.files.iter().map(|f| f.add + f.del).sum();
     let default_level = if app.full {
         3
@@ -378,6 +451,7 @@ fn render_shell(app: &App, view: &str) -> Result<String> {
         "generation": snap.generation,
         "defaultLevel": default_level,
         "files": mfiles,
+        "notes": notes,
         "review": review,
     });
     // Safe to embed in <script>: no "</" sequences survive.
@@ -386,21 +460,37 @@ fn render_shell(app: &App, view: &str) -> Result<String> {
     let tmpl = Assets::get("shell.html").ok_or_else(|| anyhow::anyhow!("missing shell.html"))?;
     let mut env = minijinja::Environment::new();
     env.add_template("shell.html", std::str::from_utf8(&tmpl.data)?)?;
+    // Sidebar group headings, when files are in risk order across tiers.
+    let tiers = snap.triage.iter().map(|t| t.tier);
+    let grouped = app.cfg.order_by_risk && snap.triage.windows(2).any(|w| w[0].tier != w[1].tier);
     let files: Vec<_> = snap
         .files
         .iter()
         .zip(&mfiles)
+        .zip(&snap.triage)
         .enumerate()
-        .map(|(i, (f, m))| {
+        .map(|(i, ((f, m), t))| {
             let (dir, name) = match f.path.rsplit_once('/') {
                 Some((d, n)) => (d.to_string(), n.to_string()),
                 None => (String::new(), f.path.clone()),
             };
+            let tier_head = if grouped && (i == 0 || snap.triage[i - 1].tier != t.tier) {
+                let n = tiers.clone().filter(|&x| x == t.tier).count();
+                format!("{} · {n}", t.tier.label())
+            } else {
+                String::new()
+            };
+            let nnotes = notes.iter().filter(|n| n.path == f.path).count();
             minijinja::context! {
                 i, path => f.path, dir, name, old_path => f.old_path, status => f.status.to_string(),
                 add => f.add, del => f.del, viewed => m.viewed, gd => m.gd,
+                tier => t.tier.key(), why => t.why, tier_head, nnotes,
             }
         })
+        .collect();
+    let stray: Vec<_> = stray
+        .iter()
+        .map(|n| minijinja::context! { heading => n.heading, body => n.body })
         .collect();
     let commits: Vec<_> = snap
         .commits
@@ -419,6 +509,7 @@ fn render_shell(app: &App, view: &str) -> Result<String> {
         reviewing => app.review.is_some(), branch => snap.branch,
         total_add => snap.files.iter().map(|f| f.add).sum::<u32>(),
         total_del => snap.files.iter().map(|f| f.del).sum::<u32>(), model_json,
+        intro => snap.notes.intro, stray, nnotes_total => notes.len(),
     })?)
 }
 
@@ -483,12 +574,27 @@ async fn set_viewed(
 async fn resnapshot(State(app): State<Arc<App>>) -> Response {
     let res = tokio::task::spawn_blocking(move || {
         let t0 = Instant::now();
+        // The agent may have updated its notes file since; stdin can't be re-read.
+        let notes = match &app.notes_src {
+            Some(p) if p.as_os_str() != "-" => {
+                let text = read_notes(p)?;
+                if let Some(review) = app.review {
+                    app.store.set_notes(review, &text)?;
+                }
+                Arc::new(crate::notes::parse(&text))
+            }
+            _ => app.snap().notes.clone(),
+        };
         let snap = build_snapshot(
             &app.git,
             &app.cfg,
             &app.target,
             app.base_override.as_deref(),
+            notes,
         )?;
+        for w in snap.note_warnings() {
+            eprintln!("gv: {w}");
+        }
         eprintln!(
             "gv: re-snapshot: {} files in {} ms",
             snap.files.len(),

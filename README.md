@@ -65,7 +65,7 @@ gv 3f2a1c          → gv c 3f2a1c
 gv feat/x          → gv b feat/x
 ```
 
-Flags common to all targets: `--port`, `--no-open`, `--full` (start at collapse level 3), `-w` (ignore whitespace), `--stack` (force per-commit view), `--base <ref>` (override default branch).
+Flags common to all targets: `--port`, `--no-open`, `--full` (start at collapse level 3), `-w` (ignore whitespace), `--stack` (force per-commit view), `--base <ref>` (override default branch), `--notes <file>` (agent notes, §6.5; `-` reads stdin).
 
 Behavior:
 - Default branch detection: `origin/HEAD`, else `main`, else `master`, else `--base`.
@@ -95,7 +95,7 @@ Behavior:
 └──────────────┴──────────────────────────────────────────────────┘
 ```
 
-- **Sidebar**: file tree grouped by configured ordering (see §9), each with `+/−` counts, viewed state (●/○/◐ = changed since viewed), bar height proportional to size. Scroll-spy highlights the current file. Commit message(s) shown as the first entry (Gerrit).
+- **Sidebar**: file tree in risk order (§6.5), grouped under tier headings, each with `+/−` counts, viewed state (●/○/◐ = changed since viewed), bar height proportional to size. Scroll-spy highlights the current file. Commit message(s) shown as the first entry (Gerrit).
 - **Two sticky rows per file**: file header (path, counts, viewed toggle, open-in-editor) and **breadcrumb** (enclosing symbol path at the top visible line, e.g. `FooService › #call › each block`). Breadcrumb segments are clickable → scroll to that symbol.
 - **Touched-symbols outline**: expandable row under the file header listing every symbol intersecting a hunk with its own `+/−`, e.g. `#call +12 −3`, `#build_query +40`, `#normalize (new)`. Click to jump.
 - **Fold bars** between hunks: `⋯ N lines · <symbols hidden inside>`, plus a category breakdown when applicable (`120 unchanged · 15 whitespace-only`). Click a symbol name to reveal exactly that symbol. Controls: expand 20 up / 20 down / to enclosing block / all.
@@ -115,6 +115,7 @@ Behavior:
 | `j` / `k` | next / prev hunk |
 | `J` / `K` | next / prev file |
 | `n` / `N` | next / prev *unviewed* file |
+| `a` / `A` | next / prev agent note (§6.5); expands and loads files on the way |
 | `v` | toggle viewed on current file (and collapse it) |
 | `V` | mark viewed and go to next unviewed |
 | `1` `2` `3` | collapse level for current file |
@@ -180,6 +181,42 @@ Output format (stable; agents parse it):
 Comments anchor to `(path, side, line, blob)` of their last row plus a `span` of rows; side `o` marks a removed line (old line number). Blocks print as `path:a-b` with the block as the excerpt. A comment whose line isn't in the current view's diff is shown at the top of its file as outdated. Only `gv review` exposes the review endpoints; plain `gv` returns 404 for them.
 
 Agents learn the protocol from the `gv-review` Claude Code skill in `skills/gv-review/` (symlink it into `~/.claude/skills/` to use it in every project). Invoked as `/gv-review <args>`, the arguments are passed through to `gv review <args>` (e.g. `/gv-review s`).
+
+### 6.5 Agent notes and risk order
+
+Reading every line of a 3,000-line agent diff doesn't scale, so gv helps decide where to look.
+
+**Agent notes.** The agent passes `--notes <file>`, a markdown guide to its own change:
+
+```markdown
+Intent, and every decision made without being asked.
+
+## src/billing/charge.rs:40-72 [check]
+Unsure whether retries can double-charge.
+
+## src/generated/schema.rs [mechanical]
+Regenerated; no hand edits.
+```
+
+- Text before the first `## ` is the intro, shown in a card above the files. `## path` is a note on a file, `## path:a-b` on new-file lines a..b. Headings inside code fences don't count.
+- A line note hangs under the last of its lines shown in the diff, and hovering it highlights them. File notes, and notes on lines the diff doesn't show, sit at the top of the file. Notes on paths not in the view appear under the intro. At startup, gv warns on stderr about notes it can't place, so the agent can fix them.
+- `[check]` = look closely, `[mechanical]` = safe to skim (see below).
+- Notes navigation: `a` / `A`, the Prev / Next buttons in the sidebar, or ‹ › on a note to step on from it. Flagged files have a tinted ⚑ row in the sidebar.
+- In `gv review`, every note has a Reply button, including the intro and the notes in the card above the files (the intro's reply prints as `Reply to your intro`). A reply is a review comment tied to the note (by heading). In the output it's `### n. Reply to your note on <heading>`, followed by the quoted note and then the reply. If the note is gone after `r`, the reply is listed as outdated.
+- In `gv review`, notes are saved with the draft: resuming without `--notes` keeps them, and passing `--notes` replaces them. `r` re-reads the notes file (not stdin).
+
+**Risk order.** Files are sorted into tiers, in path order within each tier. The sidebar shows a heading per tier, and each file header has a chip saying why the file is where it is:
+
+| Tier | What |
+|---|---|
+| Flagged by the agent | files with a `[check]` note |
+| Sensitive | migrations, SQL, CI, Docker/Terraform, dependency manifests, `.env*`, auth/security/crypto/secret paths, `[sensitive] patterns` |
+| Code | everything else |
+| Tests | `test/`, `spec/`, `__tests__/`, `*_test.*`, `*.spec.*`, ... |
+| Docs | `docs/`, `*.md`, `*.rst`, ... |
+| Mechanical | lockfiles, minified, source maps, snapshots, generated schema, `vendor/`, whitespace-only changes, renames and mode changes without content changes, `[collapse] patterns`, and `[mechanical]` from the agent. These start collapsed. |
+
+gv's own evidence ranks above the agent's claims: `[check]` promotes any file, but `[mechanical]` never demotes a sensitive one. `order = "path"` turns the sorting off; chips and collapsing stay.
 
 ## 7. Architecture
 
@@ -294,19 +331,13 @@ context = 3
 ignore_whitespace = false
 tab_width = 4                    # tabs expanded server-side; needed for wrap/height math
 
-[order]                          # file ordering groups, first match wins
-groups = [
-  "db/migrate/**",
-  "app/models/**",
-  "app/services/**",
-  "app/controllers/**",
-  "app/views/**",
-  "app/javascript/**",
-  "spec/**", "test/**",
-]
+order = "risk"                   # risk tiers (§6.5), or "path"
 
-[collapse]                       # collapsed by default, one-click to open
-patterns = ["db/schema.rb", "*.lock", "Gemfile.lock", "**/__snapshots__/**", "*.min.*"]
+[collapse]                       # extra mechanical files: start collapsed (built-ins in §6.5)
+patterns = ["app/assets/builds/**", "*.pb.go"]
+
+[sensitive]                      # extra sensitive files: sorted near the top
+patterns = ["app/models/payment*.rb", "config/initializers/**"]
 
 [editor]                         # GLOBAL CONFIG ONLY (~/.config/gv/config.toml); ignored in .gv.toml, see §7.5
 command = "zed://file/{path}:{line}"   # or "cursor://...", or "nvim --server $NVIM --remote +{line} {path}"

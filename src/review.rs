@@ -20,6 +20,7 @@ pub fn routes() -> Router<Arc<App>> {
     Router::new()
         .route("/review/comment", post(add_comment))
         .route("/review/comment/{id}", post(edit_comment))
+        .route("/review/reply", post(reply))
         .route("/review/summary", post(save_summary))
         .route("/review/submit", post(submit))
 }
@@ -103,6 +104,76 @@ async fn add_comment(State(app): State<Arc<App>>, Json(c): Json<NewComment>) -> 
         } else {
             snap.label.clone()
         },
+        note: String::new(),
+        body: c.body,
+    };
+    match app.store.add_comment(review, &comment) {
+        Ok(id) => {
+            comment.id = id;
+            Json(comment).into_response()
+        }
+        Err(e) => err(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct NewReply {
+    generation: u64,
+    /// The agent note's heading, as sent in the model.
+    note: String,
+    body: String,
+}
+
+/// A reply to an agent note: a comment that quotes the note instead of diff lines.
+async fn reply(State(app): State<Arc<App>>, Json(c): Json<NewReply>) -> Response {
+    let Some(review) = app.review else {
+        return not_reviewing();
+    };
+    if c.body.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "empty reply").into_response();
+    }
+    let Some(snap) = app.by_generation(c.generation) else {
+        return (StatusCode::CONFLICT, "stale snapshot").into_response();
+    };
+    let intro;
+    let n = if c.note == crate::notes::INTRO && !snap.notes.intro.is_empty() {
+        intro = crate::notes::Note {
+            heading: c.note.clone(),
+            path: String::new(),
+            a: 0,
+            b: 0,
+            tag: crate::notes::Tag::None,
+            body: snap.notes.intro.clone(),
+        };
+        &intro
+    } else {
+        match snap.notes.notes.iter().find(|n| n.heading == c.note) {
+            Some(n) => n,
+            None => return (StatusCode::NOT_FOUND, "no such note").into_response(),
+        }
+    };
+    let blob = snap
+        .files
+        .iter()
+        .find(|f| f.path == n.path)
+        .map(|f| f.new_blob.clone())
+        .unwrap_or_default();
+    let loc = match (n.a, n.b) {
+        (0, _) => String::new(),
+        (a, b) if a == b => a.to_string(),
+        (a, b) => format!("{a}-{b}"),
+    };
+    let mut comment = Comment {
+        id: 0,
+        path: n.path.clone(),
+        side: "n".into(),
+        line: n.b,
+        blob,
+        span: 1,
+        loc,
+        excerpt: n.body.clone(),
+        context: String::new(),
+        note: n.heading.clone(),
         body: c.body,
     };
     match app.store.add_comment(review, &comment) {
@@ -291,6 +362,18 @@ pub fn format_review(
         } else {
             c.line.to_string()
         };
+        if !c.note.is_empty() {
+            if c.note == crate::notes::INTRO {
+                let _ = writeln!(o, "### {}. Reply to your intro\n", n + 1);
+            } else {
+                let _ = writeln!(o, "### {}. Reply to your note on {}\n", n + 1, c.note);
+            }
+            for l in c.excerpt.lines() {
+                let _ = writeln!(o, "> {l}");
+            }
+            let _ = writeln!(o, "\n{}\n", c.body.trim());
+            continue;
+        }
         let ctx = if c.context.is_empty() {
             String::new()
         } else {
@@ -325,7 +408,21 @@ mod tests {
             loc: "42".into(),
             excerpt: " def x\n+  y".into(),
             context: String::new(),
+            note: String::new(),
             body: "Rename this.".into(),
+        };
+        let r = Comment {
+            id: 2,
+            path: "app/foo.rb".into(),
+            side: "n".into(),
+            line: 20,
+            blob: "abc".into(),
+            span: 1,
+            loc: "10-20".into(),
+            excerpt: "Unsure about this.\nTwo lines.".into(),
+            context: String::new(),
+            note: "app/foo.rb:10-20 [check]".into(),
+            body: "It's fine.".into(),
         };
         let md = format_review(
             2,
@@ -333,11 +430,12 @@ mod tests {
             "feat/x",
             "0123456789",
             "Mostly good.",
-            &[c],
+            &[c, r],
         );
-        assert!(md.starts_with("<gv-review number=\"2\" verdict=\"request_changes\" branch=\"feat/x\" reviewed=\"01234567\" comments=\"1\">"));
+        assert!(md.starts_with("<gv-review number=\"2\" verdict=\"request_changes\" branch=\"feat/x\" reviewed=\"01234567\" comments=\"2\">"));
         assert!(md.contains("# Review 2 on feat/x: changes requested"));
         assert!(md.contains("### 1. app/foo.rb:42\n\n~~~diff\n def x\n+  y\n~~~\n\nRename this."));
+        assert!(md.contains("### 2. Reply to your note on app/foo.rb:10-20 [check]\n\n> Unsure about this.\n> Two lines.\n\nIt's fine."));
         assert!(md.trim_end().ends_with("</gv-review>"));
     }
 

@@ -19,6 +19,8 @@ pub struct MFile<'a> {
     /// Digits in the widest line number (gutter width).
     pub gd: u32,
     pub viewed: &'static str,
+    /// Risk tier key (see triage); "mech" files start collapsed.
+    pub tier: &'static str,
     pub old_blob: &'a str,
     pub new_blob: &'a str,
     /// Per hunk: display width of each row, tabs expanded.
@@ -67,6 +69,7 @@ pub fn model_file<'a>(f: &'a FileDiff, viewed: &'static str, tab_width: usize) -
         note: f.note(),
         gd: digits(max_no),
         viewed,
+        tier: "code",
         old_blob: &f.old_blob,
         new_blob: &f.new_blob,
         hunks,

@@ -13,6 +13,7 @@
   --add-bg: #e6ffec; --add-gut: #ccffd8; --add-fg: #1a7f37;
   --del-bg: #ffebe9; --del-gut: #ffd7d5; --del-fg: #cf222e;
   --hunk-bg: #ddf4ff; --cur: #0969da; --cur-bg: #ddf4ff;
+  --agent: #8250df; --warn: #9a6700;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   color-scheme: light;
 }
@@ -22,6 +23,7 @@
     --add-bg: #12261e; --add-gut: #1b4721; --add-fg: #3fb950;
     --del-bg: #25171c; --del-gut: #542426; --del-fg: #f85149;
     --hunk-bg: #121d2f; --cur: #4493f8; --cur-bg: #1f2c3d;
+    --agent: #ab7df8; --warn: #d29922;
     color-scheme: dark;
   }
 }
@@ -30,6 +32,7 @@
   --add-bg: #12261e; --add-gut: #1b4721; --add-fg: #3fb950;
   --del-bg: #25171c; --del-gut: #542426; --del-fg: #f85149;
   --hunk-bg: #121d2f; --cur: #4493f8; --cur-bg: #1f2c3d;
+  --agent: #ab7df8; --warn: #d29922;
   color-scheme: dark;
 }
 
@@ -64,6 +67,7 @@ button.primary { background: var(--cur) !important; color: #fff !important; bord
 #tree .fi { display: grid; grid-template-columns: 12px 1fr auto; grid-template-rows: auto 2px; column-gap: 6px; align-items: center; padding: 2px 12px 2px 16px; color: inherit; text-decoration: none; border-left: 2px solid transparent; }
 #tree .fi:hover { background: var(--bg); }
 #tree .fi.cur { background: var(--cur-bg); border-left-color: var(--cur); }
+#tree .fi .nmw { display: flex; align-items: baseline; min-width: 0; } /* name + note/comment badges */
 #tree .fi .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #tree .fi .cnt { font: 11px var(--mono); }
 #tree .fi .bar { grid-column: 2 / 4; display: flex; height: 2px; opacity: .7; }
@@ -92,6 +96,9 @@ section.file { border-bottom: 1px solid var(--border); }
 .fh .path { font-family: var(--mono); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1 1 auto; cursor: pointer; }
 .fh .pd, .fh .from { color: var(--muted); }
 .fh .cnt { font: 12px var(--mono); }
+.fh .why { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 10px; padding: 0 7px; flex: none; }
+.fh .why-check { color: var(--warn); border-color: currentColor; }
+.fh .why-sensitive { color: var(--del-fg); border-color: currentColor; }
 .fh .vw { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 4px; cursor: pointer; }
 section.cur .fh { box-shadow: inset 3px 0 0 var(--cur); }
 
@@ -168,7 +175,53 @@ section.cur .fh { box-shadow: inset 3px 0 0 var(--cur); }
 .cmt-out { padding: 4px 0; }
 .cmt-out .cmt-h::before { content: "outdated"; font-size: 10px; text-transform: uppercase; border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; }
 .lv2 .cmt, .lv2 .cmt-form, .lv2 .cmt-out { display: none; }
-#tree .fi .cc { font-size: 10px; color: var(--cur); margin-left: 4px; }
+#tree .fi .cc { font-size: 10px; color: var(--cur); margin-left: 4px; flex: none; }
+
+/* Risk tiers (sidebar groups) */
+#tree .tier { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); padding: 12px 12px 0; }
+#tree .tier-check { color: var(--warn); }
+#tree .tier-sensitive { color: var(--del-fg); }
+#tree .fi .an { font-size: 10px; color: var(--agent); margin-left: 4px; flex: none; }
+#tree .fi.flag { background: color-mix(in srgb, var(--warn) 13%, transparent); border-left-color: var(--warn); }
+#tree .fi.flag:hover { background: color-mix(in srgb, var(--warn) 20%, transparent); }
+#tree .fi.flag.cur { background: var(--cur-bg); border-left-color: var(--cur); }
+#tree .fi.flag .nm::before { content: "⚑ "; color: var(--warn); }
+.notenav { display: flex; align-items: center; gap: 6px; margin-top: 20px; font-size: 12px; color: var(--agent); }
+.notenav span { margin-right: auto; }
+.notenav button { font: inherit; font-size: 12px; color: var(--cur); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; cursor: pointer; }
+.notenav button:hover { border-color: var(--cur); }
+
+/* Agent notes */
+#intro { margin: 12px; border: 1px solid var(--border); border-left: 3px solid var(--agent); border-radius: 8px; background: var(--bg2); padding: 8px 12px; max-width: 900px; }
+#intro summary { cursor: pointer; font-weight: 600; color: var(--agent); }
+#intro .ib { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 6px; line-height: 1.5; }
+#intro .is { margin-top: 10px; }
+#intro .ih { font: 600 12.5px var(--mono); }
+#intro .ibtns { margin-top: 4px; }
+#intro .ibtns button { font: inherit; font-size: 12px; font-weight: 600; background: none; border: 0; color: var(--cur); cursor: pointer; padding: 0; }
+#intro .ibtns button:hover { text-decoration: underline; }
+#intro .cmt.reply, #intro .cmt-form.reply { margin: 6px 0 8px 24px; max-width: none; }
+.anote {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 13px; line-height: 1.45;
+  margin: 6px 12px 8px calc(2 * (var(--gd) * 1ch + var(--gp)) + 2ch);
+  border: 1px solid var(--border); border-left: 3px solid var(--agent); border-radius: 8px; background: var(--bg2); max-width: 760px;
+}
+.anote .cmt-h { background: none; }
+.anote .cmt-h b { color: var(--agent); }
+.anote .tag:not(:empty) { font-size: 10px; text-transform: uppercase; border: 1px solid currentColor; border-radius: 3px; padding: 0 4px; }
+.anote.t-check { border-left-color: var(--warn); }
+.anote.t-check .tag { color: var(--warn); }
+.anotes { padding: 4px 0; }
+.lv2 .anote, .lv2 .anotes { display: none; }
+.anote .cmt-h button { font: inherit; font-size: 12px; font-weight: 600; background: none; border: 0; color: var(--cur); cursor: pointer; padding: 0 2px; }
+.anote .cmt-h button:hover { text-decoration: underline; }
+/* Reply is the main action on a note: a filled button. */
+.anote .cmt-h button[data-act=reply], #intro .ibtns button { color: #fff; background: var(--cur); border-radius: 6px; padding: 1px 10px; font-weight: 600; }
+.anote .cmt-h button[data-act=reply]:hover, #intro .ibtns button:hover { text-decoration: none; filter: brightness(1.1); }
+.anote.flash { animation: flash 1.2s ease-out; }
+@keyframes flash { from { box-shadow: 0 0 0 3px var(--agent); } to { box-shadow: 0 0 0 3px transparent; } }
+/* Replies to a note hang off it, indented. */
+.cmt.reply, .cmt-form.reply { margin-left: calc(2 * (var(--gd) * 1ch + var(--gp)) + 2ch + 24px); max-width: 736px; }
 .rvcard { width: 560px; }
 #rvlist { margin: 8px 0; max-height: 200px; overflow: auto; font-size: 12px; }
 #rvlist a { display: block; color: inherit; text-decoration: none; padding: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

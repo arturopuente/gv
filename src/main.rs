@@ -2,11 +2,13 @@ mod config;
 mod diff;
 mod git;
 mod highlight;
+mod notes;
 mod render;
 mod review;
 mod server;
 mod store;
 mod target;
+mod triage;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -33,6 +35,7 @@ Examples:
   gv l 3 --full
   gv -C ~/code/app main..HEAD
   gv review s             re-review only what changed since last time
+  gv review --notes n.md  open a review with the agent's notes on its work
 
 In the browser, press ? for keyboard shortcuts.";
 
@@ -58,6 +61,11 @@ struct Cli {
     /// Override the default branch used as the comparison base.
     #[arg(long)]
     base: Option<String>,
+    /// Agent notes on the change: markdown, `## path[:a-b] [check|mechanical]`
+    /// sections after an intro ("-" reads stdin). Shown inline, and used to
+    /// order files.
+    #[arg(long, value_name = "FILE")]
+    notes: Option<PathBuf>,
     /// Run as if gv was started in <path>.
     #[arg(short = 'C', value_name = "PATH")]
     repo: Option<PathBuf>,
@@ -92,14 +100,30 @@ fn run() -> Result<()> {
         &cli.target[..]
     };
     let target = target::parse(target_args, &git)?;
-    let snap = server::build_snapshot(&git, &cfg, &target, cli.base.as_deref())?;
+    let notes_text = cli.notes.as_deref().map(server::read_notes).transpose()?;
+    let notes = Arc::new(notes::parse(notes_text.as_deref().unwrap_or("")));
+    let mut snap = server::build_snapshot(&git, &cfg, &target, cli.base.as_deref(), notes)?;
     let store = store::Store::open(&store::repo_id(&git)?)?;
     let token = store::random_hex(16)?;
     let review = if reviewing {
-        Some(store.draft_review(&snap.branch)?)
+        let id = store.draft_review(&snap.branch)?;
+        // New notes replace the draft's; without any, a resumed draft keeps its own.
+        match &notes_text {
+            Some(t) => store.set_notes(id, t)?,
+            None => {
+                let saved = notes::parse(&store.notes(id)?);
+                if !saved.is_empty() {
+                    snap.set_notes(Arc::new(saved), &cfg);
+                }
+            }
+        }
+        Some(id)
     } else {
         None
     };
+    for w in snap.note_warnings() {
+        eprintln!("gv: {w}");
+    }
 
     let (add, del) = snap
         .files
@@ -127,6 +151,7 @@ fn run() -> Result<()> {
             target,
             cli.base,
             cli.full,
+            cli.notes,
             token.clone(),
             port,
             snap,

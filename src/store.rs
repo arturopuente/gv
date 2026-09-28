@@ -70,6 +70,9 @@ pub struct Comment {
     pub excerpt: String,
     /// Which view it was written in ("" = whole review, else a label).
     pub context: String,
+    /// Heading of the agent note this replies to ("" for a line comment);
+    /// `excerpt` then holds the note's text.
+    pub note: String,
     pub body: String,
 }
 
@@ -98,12 +101,13 @@ impl Store {
              CREATE TABLE IF NOT EXISTS review(
                id INTEGER PRIMARY KEY, branch TEXT NOT NULL, created INTEGER NOT NULL,
                summary TEXT NOT NULL DEFAULT '', verdict TEXT, submitted INTEGER,
-               number INTEGER, reviewed TEXT);
+               number INTEGER, reviewed TEXT, notes TEXT NOT NULL DEFAULT '');
              CREATE TABLE IF NOT EXISTS comment(
                id INTEGER PRIMARY KEY, review_id INTEGER NOT NULL REFERENCES review(id),
                path TEXT NOT NULL, side TEXT NOT NULL, line INTEGER NOT NULL, blob TEXT NOT NULL,
                excerpt TEXT NOT NULL, context TEXT NOT NULL, body TEXT NOT NULL, created INTEGER NOT NULL,
-               span INTEGER NOT NULL DEFAULT 1, loc TEXT NOT NULL DEFAULT '');",
+               span INTEGER NOT NULL DEFAULT 1, loc TEXT NOT NULL DEFAULT '',
+               note TEXT NOT NULL DEFAULT '');",
         )?;
         // Databases from before multi-line comments lack span/loc.
         let has_span: bool = db
@@ -114,6 +118,19 @@ impl Store {
                 "ALTER TABLE comment ADD COLUMN span INTEGER NOT NULL DEFAULT 1;
                  ALTER TABLE comment ADD COLUMN loc TEXT NOT NULL DEFAULT '';",
             )?;
+        }
+        // ...and before agent notes, reviews lack notes and comments can't reply to one.
+        let has_reply: bool = db
+            .prepare("SELECT 1 FROM pragma_table_info('comment') WHERE name='note'")?
+            .exists([])?;
+        if !has_reply {
+            db.execute_batch("ALTER TABLE comment ADD COLUMN note TEXT NOT NULL DEFAULT '';")?;
+        }
+        let has_notes: bool = db
+            .prepare("SELECT 1 FROM pragma_table_info('review') WHERE name='notes'")?
+            .exists([])?;
+        if !has_notes {
+            db.execute_batch("ALTER TABLE review ADD COLUMN notes TEXT NOT NULL DEFAULT '';")?;
         }
         Ok(Store { db: Mutex::new(db) })
     }
@@ -180,10 +197,29 @@ impl Store {
         Ok(())
     }
 
+    /// The agent notes a review was opened with (kept so resuming shows them).
+    pub fn notes(&self, review: i64) -> Result<String> {
+        let db = self.db.lock().unwrap();
+        Ok(db.query_row(
+            "SELECT notes FROM review WHERE id=?1",
+            params![review],
+            |r| r.get(0),
+        )?)
+    }
+
+    pub fn set_notes(&self, review: i64, notes: &str) -> Result<()> {
+        let db = self.db.lock().unwrap();
+        db.execute(
+            "UPDATE review SET notes=?2 WHERE id=?1 AND submitted IS NULL",
+            params![review, notes],
+        )?;
+        Ok(())
+    }
+
     pub fn comments(&self, review: i64) -> Result<Vec<Comment>> {
         let db = self.db.lock().unwrap();
         let mut q = db.prepare(
-            "SELECT id, path, side, line, blob, excerpt, context, body, span, loc FROM comment
+            "SELECT id, path, side, line, blob, excerpt, context, body, span, loc, note FROM comment
              WHERE review_id=?1 ORDER BY path, line, id",
         )?;
         let rows = q.query_map(params![review], |r| {
@@ -198,6 +234,7 @@ impl Store {
                 body: r.get(7)?,
                 span: r.get(8)?,
                 loc: r.get(9)?,
+                note: r.get(10)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -206,9 +243,9 @@ impl Store {
     pub fn add_comment(&self, review: i64, c: &Comment) -> Result<i64> {
         let db = self.db.lock().unwrap();
         db.execute(
-            "INSERT INTO comment(review_id, path, side, line, blob, excerpt, context, body, created, span, loc)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![review, c.path, c.side, c.line, c.blob, c.excerpt, c.context, c.body, now(), c.span, c.loc],
+            "INSERT INTO comment(review_id, path, side, line, blob, excerpt, context, body, created, span, loc, note)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![review, c.path, c.side, c.line, c.blob, c.excerpt, c.context, c.body, now(), c.span, c.loc, c.note],
         )?;
         Ok(db.last_insert_rowid())
     }

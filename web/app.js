@@ -12,13 +12,15 @@
   const secs = [...document.querySelectorAll('section.file')];
   const bodies = secs.map((s) => s.querySelector('.body'));
   const items = [...document.querySelectorAll('#tree .fi')];
-  const dirs = [...document.querySelectorAll('#tree .dir')];
+  const dirs = [...document.querySelectorAll('#tree .dir, #tree .tier')];
   const filter = document.getElementById('filter');
   const help = document.getElementById('help');
 
-  const levelFor = (f) => (f.viewed === 'v' ? 1 : M.defaultLevel);
+  // Viewed and mechanical files (lockfiles, generated, ...) start collapsed.
+  const levelFor = (f) => (f.viewed === 'v' || f.tier === 'mech' ? 1 : M.defaultLevel);
   const st = files.map((f) => ({ level: levelFor(f), loaded: false, loading: false, extra: 0 }));
   const R = M.review; // review session (comments, summary) or null
+  const NOTES = M.notes || []; // agent notes on files in this view
 
   // ---- geometry -----------------------------------------------------------
 
@@ -101,7 +103,7 @@
     st[i].level = lvl;
     secs[i].classList.remove('lv1', 'lv2', 'lv3');
     secs[i].classList.add(`lv${lvl}`);
-    if (R && st[i].loaded) measureExtra(i);
+    if (st[i].loaded) measureExtra(i);
     sizeBody(i);
     if (lvl > 1) maybeLoad(i);
   }
@@ -137,9 +139,14 @@
 
   let pending = null; // {i, h}: jump target to re-align once file i loads
 
-  async function load(i) {
+  // Load file i's fragment; concurrent calls share one fetch.
+  function load(i) {
     const s = st[i];
-    if (s.loaded || s.loading) return;
+    return s.loaded ? Promise.resolve() : (s.promise ||= fetchFile(i));
+  }
+
+  async function fetchFile(i) {
+    const s = st[i];
     s.loading = true;
     let html;
     try {
@@ -157,7 +164,10 @@
       b.classList.add('ld');
       s.loaded = true;
       s.loading = false;
+      const top = placeNotes(i);
       if (R) placeComments(i);
+      if (top) b.prepend(top); // file-level notes above outdated comments
+      measureExtra(i);
       sizeBody(i);
     });
     if (pending && pending.i === i) {
@@ -426,6 +436,145 @@
     mmSchedule();
   }
 
+  // ---- agent notes ------------------------------------------------------------------
+  // Notes the agent wrote about its own change (--notes). A note on lines a..b
+  // hangs under the last of those new-file lines shown in the diff; a note on
+  // the whole file, or on lines the diff doesn't show, goes at the top.
+
+  const noteRows = new WeakMap();
+  const TAGS = { check: 'look closely', mechanical: 'mechanical' };
+
+  function noteEl(n, where) {
+    const el = document.createElement('div');
+    el.className = `anote t-${n.tag}`;
+    el.dataset.note = n.heading;
+    el.innerHTML = `<div class="cmt-h"><b>Agent</b><span class="tag"></span><span class="where"></span><span class="sp"></span>${R ? '<button type="button" data-act="reply">Reply</button>' : ''}<button type="button" data-act="nprev" title="Previous agent note (A)">‹</button><button type="button" data-act="nnext" title="Next agent note (a)">›</button></div><div class="cmt-b"></div>`;
+    el.querySelector('.tag').textContent = TAGS[n.tag] || '';
+    el.querySelector('.where').textContent = where;
+    el.querySelector('.cmt-b').textContent = n.body;
+    return el;
+  }
+
+  // Inline notes are placed now; returns the box for the top of the file, if any.
+  function placeNotes(i) {
+    const mine = NOTES.filter((n) => n.path === files[i].path);
+    if (!mine.length) return null;
+    const rows = [...bodies[i].querySelectorAll('.l')].filter((r) => !r.classList.contains('d'));
+    const box = document.createElement('div');
+    box.className = 'anotes';
+    for (const n of mine) {
+      const span = n.a === n.b ? `line ${n.a}` : `lines ${n.a}–${n.b}`;
+      const hit = n.a ? rows.filter((r) => { const no = +r.children[1].textContent; return no >= n.a && no <= n.b; }) : [];
+      const el = noteEl(n, !n.a ? '' : hit.length ? span : `${span}, not shown in this diff`);
+      if (hit.length) {
+        noteRows.set(el, hit);
+        insertAfterRow(hit[hit.length - 1], el);
+      } else box.append(el);
+      if (R) el.after(...R.comments.filter((c) => c.note === n.heading).map((c) => replyEl(c)));
+    }
+    return box.childElementCount ? box : null;
+  }
+
+  const isReplyTo = (c, i) => c.note && NOTES.some((n) => n.heading === c.note && n.path === files[i].path);
+
+  function replyEl(c) {
+    const el = commentEl(c, false);
+    el.classList.add('reply');
+    el.querySelector('.where').textContent = 'reply to the agent';
+    return el;
+  }
+
+  // Run a DOM change in file i keeping the view steady, or directly for the
+  // notes card above the files (i < 0), which should grow in place.
+  function inFile(i, fn) {
+    if (i < 0) return fn();
+    anchored(() => { fn(); refit(i); });
+  }
+  const fileOf = (el) => { const sec = el.closest('section.file'); return sec ? +sec.dataset.i : -1; };
+
+  // A note in a file (.anote) or in the card above the files (.inote).
+  function openReply(noteEl) {
+    const i = fileOf(noteEl);
+    let at = noteEl; // below the note and any replies it already has
+    while (at.nextElementSibling && at.nextElementSibling.matches('.cmt.reply')) at = at.nextElementSibling;
+    let form;
+    const close = () => inFile(i, () => form.remove());
+    form = commentForm('', async (body) => {
+      const res = await post('/review/reply', { generation: M.generation, note: noteEl.dataset.note, body });
+      if (res.status === 409) return reloadAt(files[i]?.path);
+      if (!res.ok) throw new Error(await res.text());
+      const c = await res.json();
+      R.comments.push(c);
+      inFile(i, () => form.replaceWith(replyEl(c)));
+      updateCounts();
+    }, close);
+    form.classList.add('reply');
+    inFile(i, () => at.after(form));
+  }
+
+  // a / A: next / previous agent note. Steps from the note it last landed on
+  // while the page hasn't scrolled since, else from the top of the viewport.
+  // Collapsed and unloaded files are expanded and loaded on the way.
+  const hasNotes = files.map((f) => NOTES.some((n) => n.path === f.path));
+  let noteAt = null; // { el, y: scrollY after landing }
+
+  async function note(dir) {
+    const from = noteAt && noteAt.el.isConnected && Math.abs(window.scrollY - noteAt.y) < 2 ? noteAt.el : null;
+    const ref = from ? docTop(from) : window.scrollY + FH;
+    const start = sectionAt(ref);
+    for (let i = start; i >= 0 && i < files.length; i += dir) {
+      if (!hasNotes[i]) continue;
+      const open = st[i].loaded && st[i].level === 3;
+      // A collapsed file at the top is behind us going up: its notes are below its header.
+      if (!open && i === start && dir < 0) continue;
+      if (!open) {
+        setLevel(i, 3);
+        await load(i);
+      }
+      const els = [...bodies[i].querySelectorAll('.anote')];
+      const el = open
+        ? (dir > 0 ? els.find((e) => docTop(e) > ref + 1) : els.reverse().find((e) => docTop(e) < ref - 1))
+        : (dir > 0 ? els[0] : els[els.length - 1]);
+      if (!el) continue;
+      // Leave room above for the lines the note is about.
+      window.scrollTo(0, docTop(el) - Math.max(FH, window.innerHeight * 0.4));
+      noteAt?.el.classList.remove('flash');
+      noteAt = { el, y: window.scrollY };
+      el.classList.remove('flash');
+      void el.offsetWidth; // restart the animation
+      el.classList.add('flash');
+      return;
+    }
+  }
+
+  function initNotes() {
+    // Replies already written to notes in the card above the files.
+    if (R) document.querySelectorAll('#intro .inote').forEach((el) => {
+      el.after(...R.comments.filter((c) => c.note === el.dataset.note).map((c) => replyEl(c)));
+    });
+    main.addEventListener('click', (e) => {
+      const act = e.target.dataset && e.target.dataset.act;
+      const el = act && e.target.closest('.anote, .inote');
+      if (!el) return;
+      if (act === 'reply' && R) openReply(el);
+      if (act === 'nprev' || act === 'nnext') {
+        noteAt = { el, y: window.scrollY }; // step from this note, wherever it is on screen
+        note(act === 'nnext' ? 1 : -1);
+      }
+    });
+    document.getElementById('noteprev')?.addEventListener('click', (e) => { note(-1); e.currentTarget.blur(); });
+    document.getElementById('notenext')?.addEventListener('click', (e) => { note(1); e.currentTarget.blur(); });
+    // Hovering a note shows the lines it's about.
+    main.addEventListener('mouseover', (e) => {
+      const el = e.target.closest('.anote');
+      if (el && !el.classList.contains('hl')) { el.classList.add('hl'); markRows(noteRows.get(el) || [], 'rhl', true); }
+    });
+    main.addEventListener('mouseout', (e) => {
+      const el = e.target.closest('.anote');
+      if (el && !el.contains(e.relatedTarget)) { el.classList.remove('hl'); markRows(noteRows.get(el) || [], 'rhl', false); }
+    });
+  }
+
   // ---- review comments ------------------------------------------------------------
   // Comments anchor to (path, side, line, blob): side "n" is a new-file line,
   // "o" a removed line. A comment whose line isn't in this view's diff (other
@@ -437,7 +586,7 @@
   function measureExtra(i) {
     const b = bodies[i];
     st[i].extra = 0;
-    if (st[i].level !== 3 || !b.querySelector('.cmt, .cmt-form, .cmt-out')) return;
+    if (st[i].level !== 3 || !b.querySelector('.cmt, .cmt-form, .cmt-out, .anote')) return;
     const prev = b.style.contentVisibility;
     b.style.contentVisibility = 'visible'; // offscreen sections must really lay out
     const h = b.getBoundingClientRect().height;
@@ -459,7 +608,7 @@
   // Insert after the row and any comments/forms already hanging off it.
   function insertAfterRow(row, el) {
     let at = row;
-    while (at.nextElementSibling && at.nextElementSibling.matches('.cmt, .cmt-form')) at = at.nextElementSibling;
+    while (at.nextElementSibling && at.nextElementSibling.matches('.cmt, .cmt-form, .anote')) at = at.nextElementSibling;
     at.after(el);
   }
 
@@ -468,7 +617,7 @@
     el.className = 'cmt';
     el.dataset.id = c.id;
     const loc = c.loc || `${c.side === 'o' ? 'old ' : ''}${c.line}`;
-    const where = outdated || c.span > 1 ? `line${c.span > 1 ? 's' : ''} ${loc}` : '';
+    const where = c.note ? `reply to note: ${c.note}` : outdated || c.span > 1 ? `line${c.span > 1 ? 's' : ''} ${loc}` : '';
     el.innerHTML = `<div class="cmt-h"><b>You</b><span class="where"></span><span class="sp"></span>
       <button type="button" data-act="edit">Edit</button><button type="button" data-act="del">Delete</button></div><div class="cmt-b"></div>`;
     el.querySelector('.where').textContent = where;
@@ -481,7 +630,8 @@
     if (!mine.length) return;
     const out = [];
     for (const c of mine) {
-      const row = rowFor(i, c);
+      if (isReplyTo(c, i)) continue; // placed with its note
+      const row = c.note ? null : rowFor(i, c);
       if (row) insertAfterRow(row, commentEl(c, false));
       else out.push(c);
     }
@@ -491,7 +641,6 @@
       out.forEach((c) => box.append(commentEl(c, true)));
       bodies[i].prepend(box);
     }
-    measureExtra(i);
   }
 
   function refit(i) {
@@ -556,7 +705,7 @@
     let row = el.previousElementSibling;
     while (row && !row.classList.contains('l')) row = row.previousElementSibling;
     const c = R.comments.find((x) => x.id === +el.dataset.id);
-    if (!row || !c) return [];
+    if (!row || !c || c.note) return [];
     const rows = hunkRows(row.closest('.hk'));
     const end = rows.indexOf(row);
     return rows.slice(Math.max(0, end - (c.span || 1) + 1), end + 1);
@@ -585,7 +734,7 @@
   }
 
   function onCommentAction(el, act) {
-    const id = +el.dataset.id, i = +el.closest('section.file').dataset.i;
+    const id = +el.dataset.id, i = fileOf(el);
     const c = R.comments.find((x) => x.id === id);
     if (!c) return;
     if (act === 'del') {
@@ -593,12 +742,12 @@
       post(`/review/comment/${id}`, { body: '' }).then((res) => {
         if (!res.ok) return;
         R.comments.splice(R.comments.indexOf(c), 1);
-        anchored(() => { el.remove(); refit(i); });
+        inFile(i, () => el.remove());
         updateCounts();
       });
     } else if (act === 'edit') {
       let form;
-      const back = () => anchored(() => { form.replaceWith(el); refit(i); });
+      const back = () => inFile(i, () => form.replaceWith(el));
       form = commentForm(c.body, async (body) => {
         const res = await post(`/review/comment/${id}`, { body });
         if (!res.ok) throw new Error(await res.text());
@@ -606,7 +755,7 @@
         el.querySelector('.cmt-b').textContent = body;
         back();
       }, back);
-      anchored(() => { el.replaceWith(form); refit(i); });
+      inFile(i, () => el.replaceWith(form));
     }
   }
 
@@ -671,13 +820,13 @@
         const a = document.createElement('a');
         a.href = '#';
         a.innerHTML = '<code></code> ';
-        a.querySelector('code').textContent = `${c.path}:${c.line}`;
+        a.querySelector('code').textContent = c.note === '(intro)' ? '↩ intro' : c.note ? `↩ ${c.note}` : `${c.path}:${c.line}`;
         a.append(c.body.split('\n')[0]);
         a.addEventListener('click', (e) => {
           e.preventDefault();
           dlg.hidden = true;
           const i = files.findIndex((f) => f.path === c.path);
-          if (i >= 0) { if (st[i].level === 1) setLevel(i, 3); scrollToFile(i); }
+          if (i >= 0) { if (st[i].level === 1) setLevel(i, 3); scrollToFile(i); } else if (c.note) window.scrollTo(0, 0);
         });
         return a;
       }));
@@ -751,6 +900,8 @@
       case 'K': file(-1); break;
       case 'n': unviewed(1); break;
       case 'N': unviewed(-1); break;
+      case 'a': note(1); break;
+      case 'A': note(-1); break;
       case 'v': if (cur >= 0) setViewed(cur, files[cur].viewed !== 'v'); break;
       case 'V':
         if (cur >= 0) {
@@ -783,7 +934,7 @@
   function onResize() {
     anchored(() => {
       measure();
-      files.forEach((_, i) => { if (R && st[i].loaded) measureExtra(i); sizeBody(i); });
+      files.forEach((_, i) => { if (st[i].loaded) measureExtra(i); sizeBody(i); });
     });
     mmSchedule();
   }
@@ -793,6 +944,7 @@
     files.forEach((_, i) => setLevel(i, st[i].level));
     queueAllLabel();
     initMinimap();
+    initNotes();
     initReview();
     bodies.forEach((b, i) => { b.dataset.i = i; io.observe(b); });
     initBars();
