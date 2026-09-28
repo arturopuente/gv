@@ -36,8 +36,14 @@ pub struct Snapshot {
     pub head: String,
     /// Working-tree target with changes beyond HEAD.
     pub uncommitted: bool,
-    /// "" for the whole target, a commit sha, or "wt" for uncommitted changes.
+    /// "" for the whole target, a commit sha, "wt" (uncommitted) or "since".
     pub view: String,
+    /// Branch reviews are recorded against.
+    pub branch: String,
+    /// Last review pin on that branch when this snapshot was taken.
+    pub pin: Option<String>,
+    /// Commit at the head of the review (HEAD for working-tree snapshots).
+    pub head_commit: Option<String>,
 }
 
 pub struct App {
@@ -53,6 +59,12 @@ pub struct App {
     /// Per-commit / uncommitted views of the current snapshot, by view key.
     views: Mutex<HashMap<String, Arc<Snapshot>>>,
     cache: Mutex<HashMap<String, Arc<String>>>,
+    /// Review id when started as `gv review`.
+    pub review: Option<i64>,
+    /// Signalled once a review is submitted; the server then shuts down.
+    pub done: tokio::sync::Notify,
+    /// The submitted review, printed to stdout on exit.
+    pub output: Mutex<Option<String>>,
 }
 
 static GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -67,6 +79,11 @@ pub fn build_snapshot(
     let r = target::resolve(t, git, base_override)?;
     let files = diff::diff(git, &r.base, &r.head, &diff_opts(cfg))?;
     let uncommitted = r.worktree && git.rev("HEAD^{tree}").as_deref() != Some(r.head.as_str());
+    let head_commit = if r.worktree {
+        git.commit("HEAD")
+    } else {
+        git.commit(&r.head)
+    };
     Ok(Snapshot {
         generation: GENERATION.fetch_add(1, Ordering::Relaxed),
         label: r.label,
@@ -75,6 +92,9 @@ pub fn build_snapshot(
         head: r.head,
         uncommitted,
         view: String::new(),
+        pin: git.review_pin(&r.branch),
+        branch: r.branch,
+        head_commit,
     })
 }
 
@@ -97,6 +117,7 @@ impl App {
         token: String,
         port: u16,
         snap: Snapshot,
+        review: Option<i64>,
     ) -> App {
         App {
             git,
@@ -110,10 +131,13 @@ impl App {
             snap: RwLock::new(Arc::new(snap)),
             views: Mutex::new(HashMap::new()),
             cache: Mutex::new(HashMap::new()),
+            review,
+            done: tokio::sync::Notify::new(),
+            output: Mutex::new(None),
         }
     }
 
-    fn snap(&self) -> Arc<Snapshot> {
+    pub(crate) fn snap(&self) -> Arc<Snapshot> {
         self.snap.read().unwrap().clone()
     }
 
@@ -138,6 +162,16 @@ impl App {
                 None => self.git.empty_tree()?,
             };
             (base, main.head.clone(), "uncommitted changes".to_string())
+        } else if v == "since" {
+            let pin = main
+                .pin
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("nothing reviewed yet on {}", main.branch))?;
+            let base = self
+                .git
+                .rev(&format!("{pin}^{{tree}}"))
+                .ok_or_else(|| anyhow::anyhow!("review pin {pin} is not a commit"))?;
+            (base, main.head.clone(), "since last review".to_string())
         } else {
             let c = main
                 .commits
@@ -156,13 +190,16 @@ impl App {
             head,
             uncommitted: main.uncommitted,
             view: v.to_string(),
+            branch: main.branch.clone(),
+            pin: main.pin.clone(),
+            head_commit: main.head_commit.clone(),
         });
         self.views.lock().unwrap().insert(key, snap.clone());
         Ok(snap)
     }
 
     /// Any live snapshot (whole target or a view) by generation.
-    fn by_generation(&self, generation: u64) -> Option<Arc<Snapshot>> {
+    pub(crate) fn by_generation(&self, generation: u64) -> Option<Arc<Snapshot>> {
         let main = self.snap();
         if main.generation == generation {
             return Some(main);
@@ -188,6 +225,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/file/{generation}/{i}", get(file_fragment))
         .route("/viewed/{generation}/{i}", post(set_viewed))
         .route("/resnapshot", post(resnapshot))
+        .merge(crate::review::routes())
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app)
 }
@@ -329,10 +367,18 @@ fn render_shell(app: &App, view: &str) -> Result<String> {
     } else {
         3
     };
+    let review = match app.review {
+        Some(id) => Some(serde_json::json!({
+            "summary": app.store.summary(id)?,
+            "comments": app.store.comments(id)?,
+        })),
+        None => None,
+    };
     let model = serde_json::json!({
         "generation": snap.generation,
         "defaultLevel": default_level,
         "files": mfiles,
+        "review": review,
     });
     // Safe to embed in <script>: no "</" sequences survive.
     let model_json = serde_json::to_string(&model)?.replace("</", "<\\/");
@@ -369,6 +415,8 @@ fn render_shell(app: &App, view: &str) -> Result<String> {
         .unwrap_or_default();
     Ok(env.get_template("shell.html")?.render(minijinja::context! {
         repo, label => snap.label, files, commits, view => snap.view, uncommitted => snap.uncommitted,
+        has_since => snap.pin.is_some() && !matches!(app.target, Target::Since),
+        reviewing => app.review.is_some(), branch => snap.branch,
         total_add => snap.files.iter().map(|f| f.add).sum::<u32>(),
         total_del => snap.files.iter().map(|f| f.del).sum::<u32>(), model_json,
     })?)

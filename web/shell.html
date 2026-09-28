@@ -13,14 +13,19 @@
     <div class="repo">{{ repo }}</div>
     <div class="label" title="{{ label }}">{{ label }}</div>
     <div class="tot">{{ files|length }} files · <span class="add">+{{ total_add }}</span> <span class="del">−{{ total_del }}</span> · <a href="#" id="helpbtn">? keys</a></div>
-    {% if files %}<button id="allbtn" type="button" title="Shift+Tab">Collapse all</button>{% endif %}
+    <div class="acts">
+      {% if files %}<button id="allbtn" type="button" title="Shift+Tab">Collapse all</button>{% endif %}
+      {% if reviewing %}<button id="finish" type="button" class="primary">Finish review <span id="rvcount"></span></button>{% endif %}
+    </div>
+    {% if reviewing %}<div class="rvnote">Reviewing <b>{{ branch }}</b> · click a line number to comment</div>{% endif %}
   </div>
   <input id="filter" type="search" placeholder="Filter files  /" autocomplete="off" spellcheck="false">
-  {% if commits or uncommitted %}
+  {% if commits or uncommitted or has_since %}
   <details class="commits"{% if view or commits|length <= 5 %} open{% endif %}>
     <summary>{{ commits|length }} commit{% if commits|length != 1 %}s{% endif %}{% if uncommitted %} + uncommitted{% endif %}</summary>
     <nav id="views">
       <a class="cm all{% if not view %} sel{% endif %}" href="/">All changes</a>
+      {% if has_since %}<a class="cm all{% if view == "since" %} sel{% endif %}" href="/?v=since">Since last review</a>{% endif %}
       {% for c in commits %}<a class="cm{% if view == c.sha %} sel{% endif %}" href="/?v={{ c.sha }}" title="{{ c.subject }} — {{ c.author }}"><code>{{ c.short }}</code> {{ c.subject }}</a>{% endfor %}
       {% if uncommitted %}<a class="cm wt{% if view == "wt" %} sel{% endif %}" href="/?v=wt">Uncommitted changes</a>{% endif %}
     </nav>
@@ -77,6 +82,25 @@
   </div>
 </div>
 
+{% if reviewing %}
+<div id="rvdlg" class="overlay" hidden>
+  <div class="card rvcard">
+    <h2>Finish review</h2>
+    <textarea id="rvsum" rows="5" placeholder="Summary for the agent (optional)"></textarea>
+    <div id="rvlist"></div>
+    <fieldset class="verdict">
+      <label><input type="radio" name="verdict" value="comment" checked> <b>Comment</b> <span>feedback, no verdict</span></label>
+      <label><input type="radio" name="verdict" value="approve"> <b>Approve</b> <span>done with this work</span></label>
+      <label><input type="radio" name="verdict" value="request_changes"> <b>Request changes</b> <span>agent addresses them and asks again</span></label>
+    </fieldset>
+    <div class="rvbtns"><button id="rvcancel" type="button">Keep reviewing</button> <button id="rvsubmit" type="button" class="primary">Submit review</button></div>
+    <div id="rverr"></div>
+  </div>
+</div>
+<div id="rvdone" class="overlay" hidden>
+  <div class="card"><h2>Review submitted</h2><p>It's on its way to the agent that opened this review. You can close this tab.</p><p class="muted" id="rvfile"></p></div>
+</div>
+{% endif %}
 <span id="probe" aria-hidden="true">0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</span>
 <script id="model" type="application/json">{{ model_json|safe }}</script>
 <script src="/a/app.js"></script>

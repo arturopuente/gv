@@ -23,7 +23,6 @@ Reviewing AI-generated changes means reading diffs of 1,000–3,000+ lines, ofte
 - A TUI. The browser is the frontend; the terminal is the launcher.
 - Multi-user or remote access. Binds to `127.0.0.1` only.
 - Watching the repo. gv reviews a snapshot taken when the command ran; to see newer changes, re-snapshot (`r`) or rerun `gv`.
-- Line comments or feedback export to an AI agent.
 - Windows.
 
 ## 4. Prior art and what we take from each
@@ -56,7 +55,8 @@ gv                 working tree + unpushed commits vs merge-base with default br
 gv b [name]        branch (default: current) vs merge-base with default branch
 gv p <n>           GitHub PR #n (via `gh`); fetches head if missing (`pull/<n>/head`, works for forks)
 gv l [n]           last n commits (default 1); n>1 shown as a stack
-gv s               "since": <last reviewed sha>..HEAD for current branch; interdiff if rewritten
+gv s               "since": last review point..working tree for current branch; interdiff if rewritten
+gv review [target] review session: line comments + verdict, printed to stdout on submit (§6.4)
 gv c <sha>         one commit
 gv <a>..<b>        raw range, escape hatch
 
@@ -99,8 +99,9 @@ Behavior:
 - **Two sticky rows per file**: file header (path, counts, viewed toggle, open-in-editor) and **breadcrumb** (enclosing symbol path at the top visible line, e.g. `FooService › #call › each block`). Breadcrumb segments are clickable → scroll to that symbol.
 - **Touched-symbols outline**: expandable row under the file header listing every symbol intersecting a hunk with its own `+/−`, e.g. `#call +12 −3`, `#build_query +40`, `#normalize (new)`. Click to jump.
 - **Fold bars** between hunks: `⋯ N lines · <symbols hidden inside>`, plus a category breakdown when applicable (`120 unchanged · 15 whitespace-only`). Click a symbol name to reveal exactly that symbol. Controls: expand 20 up / 20 down / to enclosing block / all.
-- **Collapse levels** (Magit): `1` files only, `2` files + hunk headers, `3` everything. Applies globally with `M-1..3`, or to the current file with `1..3`. Diffs over a configurable line count (default 2,000) open at level 1.
-- **Per-file minimap**: thin gutter strip with colored ticks for hunks against total file length; click to jump.
+- **Collapse levels** (Magit): `1` files only, `2` files + hunk headers, `3` everything. Applies globally with `Shift+1..3` (or the sidebar's Collapse all / Expand all button; `Alt` is avoided because launchers like Alfred bind it), or to the current file with `1..3`. Diffs over a configurable line count (default 2,000) open at level 1.
+- **Minimap** (whole diff, VS Code style): canvas on the right edge drawing every row at 1/10 scale as a code-shaped bar (width and indent from the model) colored add/del/context, with file and hunk bands and a viewport box. Click to jump, drag the box to scroll; scrolls itself proportionally when the diff is taller than the window.
+- **Views**: the sidebar lists All changes, Since last review, each commit, and Uncommitted changes (working-tree targets); `[` / `]` step through them. Views are URLs (`/?v=<sha>|wt|since`); only commits in the review are accepted.
 - **Full-file mode** (`f` on a file): entire new file with added/changed lines tinted, removed lines as inline ghost rows. For files that are more rewrite than edit.
 - **Moved blocks**: removed/added block pairs detected as moves are rendered dimmed with a "moved from/to line N" link, in the unified view. Whitespace-insensitive matching.
 - **Word-level intraline diff** on changed-line pairs.
@@ -117,8 +118,8 @@ Behavior:
 | `v` | toggle viewed on current file (and collapse it) |
 | `V` | mark viewed and go to next unviewed |
 | `1` `2` `3` | collapse level for current file |
-| `M-1` `M-2` `M-3` | global collapse level |
-| `Tab` / `S-Tab` | cycle current section / cycle all (Magit) |
+| `Shift+1` `Shift+2` `Shift+3` | global collapse level (`Alt` works too) |
+| `S-Tab` | collapse all ↔ expand all |
 | `e` | expand hunk to enclosing block |
 | `E` | expand all context in file |
 | `f` | toggle full-file mode |
@@ -136,16 +137,49 @@ Navigation operates on an in-memory model of files/hunks (shipped as JSON with t
 
 **No cursor.** "Current" is defined by the viewport: the current file and hunk are the ones at the top visible line (the same line the breadcrumb describes). `j`/`k`/`J`/`K` scroll the target to the top of the viewport, below the sticky rows. `e`, `1..3`, `v`, `f` act on the current hunk/file. `o` opens the line under the mouse if hovering over a diff line, otherwise the top visible line.
 
-Key handling uses `event.code` (so `M-1` works on macOS, where Option-1 types `¡`) and calls `preventDefault` for bound keys (`/` would otherwise trigger Firefox quick-find). Keys are ignored while an input (e.g. the `/` filter) has focus.
+Key handling uses `event.code` (so `Shift+1` / `Alt+1` work regardless of the character they type) and calls `preventDefault` for bound keys (`/` would otherwise trigger Firefox quick-find). Keys are ignored while an input (e.g. the `/` filter) has focus.
 
 ### 6.3 Review memory
 
 - State keyed on `(repo_id, path, new_blob_sha)`. Marking a file viewed stores the blob SHA and timestamp. The SHA recorded is the one from the snapshot on screen, not whatever is on disk at the time of the click.
 - On load, each file is: **unviewed**, **viewed** (blob unchanged), or **changed since viewed** (blob differs). For the third state the default diff shown is `git diff <reviewed_blob> <current_blob>` (the interdiff), with a toggle to the full diff vs base.
 - `gv s` uses the newest reviewed commit on the branch as the base. If that commit is no longer an ancestor of HEAD (rebase/amend), compute the interdiff by diffing the two patch texts (`base1..head1` vs `base2..head2`) and show per-file "unchanged / modified / new in this revision".
-- Reviewed SHAs are pinned with `refs/gv/reviewed/<branch>` so `git gc` keeps them. Working-tree blobs that were marked viewed are pinned the same way (`refs/gv/blobs/<sha>`, or one pin commit whose tree holds them), since they exist only as loose objects written by the snapshot.
+- Submitting a review pins what was reviewed as a commit under `refs/gv/reviewed/<branch>`: its tree is the reviewed snapshot (working tree included), its parents are the reviewed HEAD commit and the previous pin, so every review point stays reachable and `git gc` keeps them. `gv s` diffs the pin's tree against a fresh working-tree snapshot; when nothing has been reviewed it says so and exits 1. Working-tree blobs that were marked viewed are pinned the same way (`refs/gv/blobs/<sha>`, or one pin commit whose tree holds them), since they exist only as loose objects written by the snapshot.
 - Renames: match by blob first, path second (`-M`).
 - Whitespace-only blob change: show as "changed since viewed" but with an empty `-w` interdiff and a one-key re-mark.
+
+### 6.4 Review sessions (agent feedback loop)
+
+The workflow mirrors reviewing a coworker's pull request, with an AI agent as the coworker:
+
+1. The agent runs `gv review` (or `gv review s` for a re-review) as a background command and hands the user the URL.
+2. The user clicks line numbers to leave comments (on added, removed or context lines), writes a summary, and submits with a verdict: **Comment**, **Approve** or **Request changes**. Drafts (comments and summary) are saved as they're written, so closing the tab or killing gv loses nothing; `gv review` resumes the branch's draft.
+3. On submit gv pins the reviewed snapshot (§6.3), saves the review to `<git-common-dir>/gv/reviews/<branch>-<n>.md`, prints it to stdout and exits 0. The agent that started gv is notified of the exit and receives the review. Exit 2 means the session ended without a submit.
+4. On **Request changes** the agent addresses every comment, commits the round as `Address review <n>`, and re-requests review with `gv review s`, so the next round shows only what changed since.
+
+Output format (stable; agents parse it):
+
+```
+<gv-review number="2" verdict="request_changes" branch="feat/x" reviewed="0698538a" comments="1">
+# Review 2 on feat/x: changes requested
+
+<summary>
+
+## Comments
+
+### 1. app/foo.rb:42
+~~~diff
+ context line
++commented line (always the last line of the excerpt)
+~~~
+
+<comment>
+</gv-review>
+```
+
+Comments anchor to `(path, side, line, blob)`; side `o` marks a removed line (old line number). A comment whose line isn't in the current view's diff is shown at the top of its file as outdated. Only `gv review` exposes the review endpoints; plain `gv` returns 404 for them.
+
+Agents learn the protocol from the `gv-review` Claude Code skill in `skills/gv-review/` (symlink it into `~/.claude/skills/` to use it in every project).
 
 ## 7. Architecture
 
@@ -303,10 +337,10 @@ Stack view; move detection; full-file mode; word-level diff; `-w` toggle; editor
 7. Killing `gv` with Ctrl-C leaves `git status` clean and the index unchanged (writes under `.git/` per §7.4 are allowed).
 8. Editing a worktree file after `gv` starts does not change what the page shows, including for files not yet loaded; `r` picks up the edit.
 9. A `.gv.toml` containing `editor.command` does not cause that command to run on `o`. A request to the server without the session token, or with a foreign `Host`, gets 403.
+10. `gv review`: comments on added and removed lines survive a reload; submitting prints a `<gv-review>` block, exits 0, and pins `refs/gv/reviewed/<branch>`; after a follow-up commit, `gv s` shows only that commit's changes.
 
 ## 12. Open questions
 
-- `gv s` when nothing has been reviewed yet on the branch: fall back to `gv b` silently, or say so?
 - Should viewed state be per-branch or per-repo? (Blob-keyed makes it mostly moot; the `refs/gv/reviewed/<branch>` pin is per-branch.)
 - Grammar set to bundle by default vs. lazy download.
 

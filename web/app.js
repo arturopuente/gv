@@ -17,7 +17,8 @@
   const help = document.getElementById('help');
 
   const levelFor = (f) => (f.viewed === 'v' ? 1 : M.defaultLevel);
-  const st = files.map((f) => ({ level: levelFor(f), loaded: false, loading: false }));
+  const st = files.map((f) => ({ level: levelFor(f), loaded: false, loading: false, extra: 0 }));
+  const R = M.review; // review session (comments, summary) or null
 
   // ---- geometry -----------------------------------------------------------
 
@@ -55,7 +56,8 @@
     if (f.note) return NH;
     let h = 0;
     for (const hk of f.hunks) h += HH + (lvl === 3 ? rowsHeight(f, hk) : 0);
-    return h;
+    // Review comments inside the file: measured, since their text wraps freely.
+    return h + (lvl === 3 && st[i].loaded ? st[i].extra : 0);
   }
 
   function sizeBody(i) {
@@ -99,6 +101,7 @@
     st[i].level = lvl;
     secs[i].classList.remove('lv1', 'lv2', 'lv3');
     secs[i].classList.add(`lv${lvl}`);
+    if (R && st[i].loaded) measureExtra(i);
     sizeBody(i);
     if (lvl > 1) maybeLoad(i);
   }
@@ -154,6 +157,7 @@
       b.classList.add('ld');
       s.loaded = true;
       s.loading = false;
+      if (R) placeComments(i);
       sizeBody(i);
     });
     if (pending && pending.i === i) {
@@ -422,11 +426,231 @@
     mmSchedule();
   }
 
+  // ---- review comments ------------------------------------------------------------
+  // Comments anchor to (path, side, line, blob): side "n" is a new-file line,
+  // "o" a removed line. A comment whose line isn't in this view's diff (other
+  // view, or the file changed) is listed at the top of its file as outdated.
+
+  let reviewDone = false;
+  const post = (url, body) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+  function measureExtra(i) {
+    const b = bodies[i];
+    st[i].extra = 0;
+    if (st[i].level !== 3 || !b.querySelector('.cmt, .cmt-form, .cmt-out')) return;
+    const prev = b.style.contentVisibility;
+    b.style.contentVisibility = 'visible'; // offscreen sections must really lay out
+    const h = b.getBoundingClientRect().height;
+    b.style.contentVisibility = prev;
+    st[i].extra = Math.max(0, h - estimate(i));
+  }
+
+  function rowFor(i, c) {
+    const f = files[i];
+    if (c.blob !== (c.side === 'n' ? f.new_blob : f.old_blob)) return null;
+    for (const row of bodies[i].querySelectorAll('.l')) {
+      const del = row.classList.contains('d');
+      if (c.side === 'n' && !del && row.children[1].textContent === String(c.line)) return row;
+      if (c.side === 'o' && del && row.children[0].textContent === String(c.line)) return row;
+    }
+    return null;
+  }
+
+  // Insert after the row and any comments/forms already hanging off it.
+  function insertAfterRow(row, el) {
+    let at = row;
+    while (at.nextElementSibling && at.nextElementSibling.matches('.cmt, .cmt-form')) at = at.nextElementSibling;
+    at.after(el);
+  }
+
+  function commentEl(c, outdated) {
+    const el = document.createElement('div');
+    el.className = 'cmt';
+    el.dataset.id = c.id;
+    const where = outdated ? `${c.side === 'o' ? 'old ' : ''}line ${c.line}` : '';
+    el.innerHTML = `<div class="cmt-h"><b>You</b><span class="where"></span><span class="sp"></span>
+      <button type="button" data-act="edit">Edit</button><button type="button" data-act="del">Delete</button></div><div class="cmt-b"></div>`;
+    el.querySelector('.where').textContent = where;
+    el.querySelector('.cmt-b').textContent = c.body;
+    return el;
+  }
+
+  function placeComments(i) {
+    const mine = R.comments.filter((c) => c.path === files[i].path);
+    if (!mine.length) return;
+    const out = [];
+    for (const c of mine) {
+      const row = rowFor(i, c);
+      if (row) insertAfterRow(row, commentEl(c, false));
+      else out.push(c);
+    }
+    if (out.length) {
+      const box = document.createElement('div');
+      box.className = 'cmt-out';
+      out.forEach((c) => box.append(commentEl(c, true)));
+      bodies[i].prepend(box);
+    }
+    measureExtra(i);
+  }
+
+  function refit(i) {
+    measureExtra(i);
+    sizeBody(i);
+    mmSchedule();
+  }
+
+  function updateCounts() {
+    if (!R) return;
+    const n = R.comments.length;
+    document.getElementById('rvcount').textContent = n ? `(${n})` : '';
+    items.forEach((el, i) => {
+      const k = R.comments.filter((c) => c.path === files[i].path).length;
+      let cc = el.querySelector('.cc');
+      if (!k) { cc?.remove(); return; }
+      if (!cc) { cc = document.createElement('span'); cc.className = 'cc'; el.querySelector('.nm').after(cc); }
+      cc.textContent = `💬${k}`;
+    });
+  }
+
+  // A comment form; `onSave(text)` resolves to the element that replaces it.
+  function commentForm(initial, onSave, onCancel) {
+    const form = document.createElement('div');
+    form.className = 'cmt-form';
+    form.innerHTML = `<textarea placeholder="Leave a comment for the agent"></textarea>
+      <div class="btns"><span class="hint">⌘/Ctrl+Enter to save · Esc to cancel</span>
+      <button type="button" data-act="cancel">Cancel</button><button type="button" class="primary" data-act="save">Comment</button></div>`;
+    const ta = form.querySelector('textarea');
+    ta.value = initial;
+    const save = async () => {
+      if (!ta.value.trim()) return;
+      form.querySelector('[data-act=save]').disabled = true;
+      try { await onSave(ta.value); } catch (e) { alert(`Saving failed: ${e.message}`); form.querySelector('[data-act=save]').disabled = false; }
+    };
+    form.addEventListener('click', (e) => {
+      const act = e.target.dataset && e.target.dataset.act;
+      if (act === 'save') save();
+      if (act === 'cancel') onCancel();
+    });
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); save(); }
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onCancel(); }
+    });
+    queueMicrotask(() => ta.focus());
+    return form;
+  }
+
+  function openNewComment(row) {
+    const sec = row.closest('section.file'), i = +sec.dataset.i;
+    const hk = row.closest('.hk'), h = +hk.dataset.h;
+    const r = [...hk.children].filter((el) => el.classList.contains('l')).indexOf(row);
+    let form;
+    const close = () => anchored(() => { form.remove(); refit(i); });
+    form = commentForm('', async (body) => {
+      const res = await post('/review/comment', { generation: M.generation, i, h, r, body });
+      if (res.status === 409) return reloadAt(files[i].path);
+      if (!res.ok) throw new Error(await res.text());
+      const c = await res.json();
+      R.comments.push(c);
+      anchored(() => { form.replaceWith(commentEl(c, false)); refit(i); });
+      updateCounts();
+    }, close);
+    anchored(() => { insertAfterRow(row, form); refit(i); });
+  }
+
+  function onCommentAction(el, act) {
+    const id = +el.dataset.id, i = +el.closest('section.file').dataset.i;
+    const c = R.comments.find((x) => x.id === id);
+    if (!c) return;
+    if (act === 'del') {
+      if (!confirm('Delete this comment?')) return;
+      post(`/review/comment/${id}`, { body: '' }).then((res) => {
+        if (!res.ok) return;
+        R.comments.splice(R.comments.indexOf(c), 1);
+        anchored(() => { el.remove(); refit(i); });
+        updateCounts();
+      });
+    } else if (act === 'edit') {
+      let form;
+      const back = () => anchored(() => { form.replaceWith(el); refit(i); });
+      form = commentForm(c.body, async (body) => {
+        const res = await post(`/review/comment/${id}`, { body });
+        if (!res.ok) throw new Error(await res.text());
+        c.body = body;
+        el.querySelector('.cmt-b').textContent = body;
+        back();
+      }, back);
+      anchored(() => { el.replaceWith(form); refit(i); });
+    }
+  }
+
+  function initReview() {
+    if (!R) return;
+    document.body.classList.add('reviewing');
+    main.addEventListener('click', (e) => {
+      const act = e.target.dataset && e.target.dataset.act;
+      const cmt = e.target.closest('.cmt');
+      if (cmt && (act === 'edit' || act === 'del')) return onCommentAction(cmt, act);
+      const num = e.target.closest('.l .o, .l .n');
+      if (num && !String(window.getSelection())) openNewComment(num.parentElement);
+    });
+
+    const dlg = document.getElementById('rvdlg');
+    const sum = document.getElementById('rvsum');
+    sum.value = R.summary || '';
+    let saveT = 0;
+    sum.addEventListener('input', () => { clearTimeout(saveT); saveT = setTimeout(() => post('/review/summary', { summary: sum.value }), 400); });
+
+    function openDialog() {
+      const list = document.getElementById('rvlist');
+      list.replaceChildren(...R.comments.map((c) => {
+        const a = document.createElement('a');
+        a.href = '#';
+        a.innerHTML = '<code></code> ';
+        a.querySelector('code').textContent = `${c.path}:${c.line}`;
+        a.append(c.body.split('\n')[0]);
+        a.addEventListener('click', (e) => {
+          e.preventDefault();
+          dlg.hidden = true;
+          const i = files.findIndex((f) => f.path === c.path);
+          if (i >= 0) { if (st[i].level === 1) setLevel(i, 3); scrollToFile(i); }
+        });
+        return a;
+      }));
+      if (!R.comments.length) list.textContent = 'No line comments.';
+      document.getElementById('rverr').textContent = '';
+      dlg.hidden = false;
+      sum.focus();
+    }
+    document.getElementById('finish').addEventListener('click', openDialog);
+    document.getElementById('rvcancel').addEventListener('click', () => { dlg.hidden = true; });
+    dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.hidden = true; });
+    dlg.addEventListener('keydown', (e) => { if (e.key === 'Escape') { dlg.hidden = true; e.stopPropagation(); } });
+
+    document.getElementById('rvsubmit').addEventListener('click', async () => {
+      const verdict = dlg.querySelector('input[name=verdict]:checked').value;
+      const btn = document.getElementById('rvsubmit');
+      btn.disabled = true;
+      const res = await post('/review/submit', { verdict, summary: sum.value });
+      if (!res.ok) {
+        btn.disabled = false;
+        document.getElementById('rverr').textContent = `Submit failed: ${await res.text()}`;
+        return;
+      }
+      const out = await res.json();
+      reviewDone = true;
+      dlg.hidden = true;
+      document.getElementById('rvfile').textContent = `Review ${out.number} · saved to ${out.file}`;
+      document.getElementById('rvdone').hidden = false;
+    });
+    updateCounts();
+  }
+
   // ---- keyboard -----------------------------------------------------------------
 
   let lastG = 0;
   function onKey(e) {
-    if (e.target instanceof HTMLInputElement) {
+    if (reviewDone) return;
+    if (e.target.closest && e.target.closest('input, textarea, [contenteditable]')) {
       if (e.key === 'Escape') { e.target.blur(); e.preventDefault(); }
       if (e.key === 'Enter' && e.target === filter) {
         const first = items.findIndex((el) => !el.classList.contains('hidden'));
@@ -494,7 +718,7 @@
   function onResize() {
     anchored(() => {
       measure();
-      files.forEach((_, i) => sizeBody(i));
+      files.forEach((_, i) => { if (R && st[i].loaded) measureExtra(i); sizeBody(i); });
     });
     mmSchedule();
   }
@@ -504,6 +728,7 @@
     files.forEach((_, i) => setLevel(i, st[i].level));
     queueAllLabel();
     initMinimap();
+    initReview();
     bodies.forEach((b, i) => { b.dataset.i = i; io.observe(b); });
     initBars();
 

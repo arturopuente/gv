@@ -14,6 +14,8 @@ pub enum Target {
         to: String,
         symmetric: bool,
     },
+    /// Changes since the last submitted review on the current branch.
+    Since,
 }
 
 pub fn parse(args: &[String], git: &Git) -> Result<Target> {
@@ -29,7 +31,7 @@ pub fn parse(args: &[String], git: &Git) -> Result<Target> {
                 .map_err(|_| anyhow!("gv l: expected a number, got '{n}'"))?,
         ),
         ["p" | "pr", ..] => bail!("gv p (GitHub PRs) is not implemented yet (M3)"),
-        ["s" | "since"] => bail!("gv s is not implemented yet (M3)"),
+        ["s" | "since"] => Target::Since,
         [x] => bare(x, git)?,
         _ => bail!("can't parse target: {}", args.join(" ")),
     };
@@ -94,6 +96,8 @@ pub struct Resolved {
     pub commits: Vec<Commit>,
     /// `head` is a working-tree snapshot, not a commit.
     pub worktree: bool,
+    /// Branch reviews are recorded against.
+    pub branch: String,
 }
 
 pub fn resolve(t: &Target, git: &Git, base_override: Option<&str>) -> Result<Resolved> {
@@ -117,6 +121,7 @@ pub fn resolve(t: &Target, git: &Git, base_override: Option<&str>) -> Result<Res
                 head,
                 commits,
                 worktree: true,
+                branch: branch_of(git),
             })
         }
         Target::Branch(name) => {
@@ -139,6 +144,7 @@ pub fn resolve(t: &Target, git: &Git, base_override: Option<&str>) -> Result<Res
                 head,
                 commits,
                 worktree: false,
+                branch: name,
             })
         }
         Target::Commit(rev) => {
@@ -157,6 +163,7 @@ pub fn resolve(t: &Target, git: &Git, base_override: Option<&str>) -> Result<Res
                 head,
                 commits,
                 worktree: false,
+                branch: branch_of(git),
             })
         }
         Target::Last(n) => {
@@ -180,6 +187,30 @@ pub fn resolve(t: &Target, git: &Git, base_override: Option<&str>) -> Result<Res
                 head,
                 commits,
                 worktree: false,
+                branch: branch_of(git),
+            })
+        }
+        Target::Since => {
+            let branch = branch_of(git);
+            let pin = git.review_pin(&branch).ok_or_else(|| {
+                anyhow!("nothing reviewed yet on {branch}; run `gv review` to start a review")
+            })?;
+            let base = git
+                .rev(&format!("{pin}^{{tree}}"))
+                .ok_or_else(|| anyhow!("review pin {pin} is not a commit"))?;
+            let head = git.snapshot_worktree()?;
+            // The pin's first parent is the HEAD commit that was reviewed.
+            let commits = match (git.commit(&format!("{pin}^1")), git.commit("HEAD")) {
+                (Some(reviewed), Some(h)) => log(git, &reviewed, &h)?,
+                _ => Vec::new(),
+            };
+            Ok(Resolved {
+                label: format!("since last review on {branch} ({})", short(&pin)),
+                base,
+                head,
+                commits,
+                worktree: true,
+                branch,
             })
         }
         Target::Range {
@@ -204,9 +235,16 @@ pub fn resolve(t: &Target, git: &Git, base_override: Option<&str>) -> Result<Res
                 head: to_sha,
                 commits,
                 worktree: false,
+                branch: branch_of(git),
             })
         }
     }
+}
+
+/// Current branch, or "detached-HEAD".
+pub fn branch_of(git: &Git) -> String {
+    git.current_branch()
+        .unwrap_or_else(|| "detached-HEAD".into())
 }
 
 /// First parent of `sha`, or the empty tree for a root commit.

@@ -3,6 +3,7 @@ mod diff;
 mod git;
 mod highlight;
 mod render;
+mod review;
 mod server;
 mod store;
 mod target;
@@ -21,13 +22,17 @@ Targets:
   l [n]           Last n commits (default: 1)
   <a>..<b>        Range; <a>...<b> diffs from their merge-base
   <branch|sha>    Bare branch names and commit shas work too
-  p <n>, s        GitHub PR, since-last-review (coming in M3)
+  s               Changes since the last submitted review
+  review [target] Review session: comment, then submit; the review is
+                  printed to stdout and gv exits (for agents)
+  p <n>           GitHub PR (coming in M3)
 
 Examples:
   gv                      review what the agent just did
   gv b feat/x --base develop
   gv l 3 --full
   gv -C ~/code/app main..HEAD
+  gv review s             re-review only what changed since last time
 
 In the browser, press ? for keyboard shortcuts.";
 
@@ -79,10 +84,22 @@ fn run() -> Result<()> {
     if cli.ignore_whitespace {
         cfg.ignore_whitespace = true;
     }
-    let target = target::parse(&cli.target, &git)?;
+    // `gv review [target]`: a review session whose result goes to stdout.
+    let reviewing = cli.target.first().is_some_and(|a| a == "review");
+    let target_args = if reviewing {
+        &cli.target[1..]
+    } else {
+        &cli.target[..]
+    };
+    let target = target::parse(target_args, &git)?;
     let snap = server::build_snapshot(&git, &cfg, &target, cli.base.as_deref())?;
     let store = store::Store::open(&store::repo_id(&git)?)?;
     let token = store::random_hex(16)?;
+    let review = if reviewing {
+        Some(store.draft_review(&snap.branch)?)
+    } else {
+        None
+    };
 
     let (add, del) = snap
         .files
@@ -113,6 +130,7 @@ fn run() -> Result<()> {
             token.clone(),
             port,
             snap,
+            review,
         ));
         let url = format!("http://127.0.0.1:{port}/?t={token}");
         println!("{url}");
@@ -121,11 +139,21 @@ fn run() -> Result<()> {
         {
             eprintln!("gv: couldn't open a browser ({e}); open the URL above");
         }
-        axum::serve(listener, server::router(app))
-            .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
+        let waiter = app.clone();
+        axum::serve(listener, server::router(app.clone()))
+            .with_graceful_shutdown(async move {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = waiter.done.notified() => {}
+                }
             })
             .await?;
+        if let Some(review) = app.output.lock().unwrap().take() {
+            print!("{review}");
+        } else if reviewing {
+            eprintln!("gv: review not submitted; the draft is saved and `gv review` resumes it");
+            std::process::exit(2);
+        }
         anyhow::Ok(())
     })
 }

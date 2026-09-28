@@ -176,6 +176,50 @@ impl Git {
         Ok(with_index(&["write-tree"])?.trim().to_string())
     }
 
+    /// Current branch name, or None when detached.
+    pub fn current_branch(&self) -> Option<String> {
+        self.try_run(&["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Pin a reviewed snapshot under `refs/gv/reviewed/<branch>` so gc keeps it
+    /// and "since last review" has a base. The pin is a commit of the reviewed
+    /// tree whose parents are the reviewed HEAD commit and the previous pin, so
+    /// every earlier review point stays reachable too.
+    pub fn pin_review(
+        &self,
+        branch: &str,
+        tree: &str,
+        head_commit: Option<&str>,
+    ) -> Result<String> {
+        let refname = format!("refs/gv/reviewed/{branch}");
+        let prev = self.rev(&refname);
+        let mut c = self.cmd();
+        c.args(["commit-tree", tree, "-m", "gv: reviewed snapshot"]);
+        for p in head_commit.into_iter().chain(prev.as_deref()) {
+            c.args(["-p", p]);
+        }
+        for (k, v) in [
+            ("GIT_AUTHOR_NAME", "gv"),
+            ("GIT_AUTHOR_EMAIL", "gv@localhost"),
+            ("GIT_COMMITTER_NAME", "gv"),
+            ("GIT_COMMITTER_EMAIL", "gv@localhost"),
+        ] {
+            c.env(k, v);
+        }
+        let sha = String::from_utf8_lossy(&self.run_bytes_with(c)?)
+            .trim()
+            .to_string();
+        self.run(&["update-ref", "-m", "gv review", &refname, &sha])?;
+        Ok(sha)
+    }
+
+    /// The last reviewed pin for a branch, if any.
+    pub fn review_pin(&self, branch: &str) -> Option<String> {
+        self.rev(&format!("refs/gv/reviewed/{branch}"))
+    }
+
     /// Read blobs by sha with one `git cat-file --batch` process.
     pub fn blobs(&self, shas: &[&str]) -> Result<Vec<Option<Vec<u8>>>> {
         let mut c = self.cmd();
