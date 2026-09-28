@@ -51,8 +51,10 @@ pub fn random_hex(bytes: usize) -> Result<String> {
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// A line comment in a review. `side` is "n" (new file line) or "o" (old
-/// line, for removed lines); `blob` is the file version it was written on.
+/// A comment on a line, or a block of lines, in a review. It anchors to its
+/// last row: `side` is "n" (new file line) or "o" (old line, for removed
+/// lines), and `span` counts the rows of the block ending there. `blob` is
+/// the file version it was written on.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Comment {
     pub id: i64,
@@ -60,7 +62,11 @@ pub struct Comment {
     pub side: String,
     pub line: u32,
     pub blob: String,
-    /// Diff lines leading up to and including the commented line.
+    /// Rows in the commented block (1 for a single line).
+    pub span: u32,
+    /// Human-readable location, e.g. "40-45" or "12 (removed line; ...)".
+    pub loc: String,
+    /// Diff lines ending with the commented line (the whole block for ranges).
     pub excerpt: String,
     /// Which view it was written in ("" = whole review, else a label).
     pub context: String,
@@ -96,8 +102,19 @@ impl Store {
              CREATE TABLE IF NOT EXISTS comment(
                id INTEGER PRIMARY KEY, review_id INTEGER NOT NULL REFERENCES review(id),
                path TEXT NOT NULL, side TEXT NOT NULL, line INTEGER NOT NULL, blob TEXT NOT NULL,
-               excerpt TEXT NOT NULL, context TEXT NOT NULL, body TEXT NOT NULL, created INTEGER NOT NULL);",
+               excerpt TEXT NOT NULL, context TEXT NOT NULL, body TEXT NOT NULL, created INTEGER NOT NULL,
+               span INTEGER NOT NULL DEFAULT 1, loc TEXT NOT NULL DEFAULT '');",
         )?;
+        // Databases from before multi-line comments lack span/loc.
+        let has_span: bool = db
+            .prepare("SELECT 1 FROM pragma_table_info('comment') WHERE name='span'")?
+            .exists([])?;
+        if !has_span {
+            db.execute_batch(
+                "ALTER TABLE comment ADD COLUMN span INTEGER NOT NULL DEFAULT 1;
+                 ALTER TABLE comment ADD COLUMN loc TEXT NOT NULL DEFAULT '';",
+            )?;
+        }
         Ok(Store { db: Mutex::new(db) })
     }
 
@@ -166,7 +183,7 @@ impl Store {
     pub fn comments(&self, review: i64) -> Result<Vec<Comment>> {
         let db = self.db.lock().unwrap();
         let mut q = db.prepare(
-            "SELECT id, path, side, line, blob, excerpt, context, body FROM comment
+            "SELECT id, path, side, line, blob, excerpt, context, body, span, loc FROM comment
              WHERE review_id=?1 ORDER BY path, line, id",
         )?;
         let rows = q.query_map(params![review], |r| {
@@ -179,6 +196,8 @@ impl Store {
                 excerpt: r.get(5)?,
                 context: r.get(6)?,
                 body: r.get(7)?,
+                span: r.get(8)?,
+                loc: r.get(9)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -187,9 +206,9 @@ impl Store {
     pub fn add_comment(&self, review: i64, c: &Comment) -> Result<i64> {
         let db = self.db.lock().unwrap();
         db.execute(
-            "INSERT INTO comment(review_id, path, side, line, blob, excerpt, context, body, created)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![review, c.path, c.side, c.line, c.blob, c.excerpt, c.context, c.body, now()],
+            "INSERT INTO comment(review_id, path, side, line, blob, excerpt, context, body, created, span, loc)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![review, c.path, c.side, c.line, c.blob, c.excerpt, c.context, c.body, now(), c.span, c.loc],
         )?;
         Ok(db.last_insert_rowid())
     }

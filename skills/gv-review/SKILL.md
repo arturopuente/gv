@@ -1,6 +1,7 @@
 ---
 name: gv-review
 description: Open a gv review session so the user can review your changes in the browser like a GitHub pull request review, then act on the review they submit. Use when the user asks to open, start or request a review ("open a review", "let me review this in gv", "review session"), and after addressing a review with requested changes, to re-request review.
+argument-hint: "[s | b [branch] | c <sha> | l [n] | <a>..<b>] [--base <ref>] [-w] [--full] [-C <path>]"
 ---
 
 # gv review sessions
@@ -12,18 +13,37 @@ as a background command, you are notified when it exits and receive the review.
 
 Work with the user the way a coworker handles a pull request review.
 
+## Arguments
+
+Invoked as `/gv-review <args>`, the arguments are exactly what follows
+`gv review` on the command line:
+
+| Invocation | Runs |
+|---|---|
+| `/gv-review` | `gv review` (working tree + unpushed commits vs the default branch) |
+| `/gv-review s` | `gv review s` (only changes since the last review) |
+| `/gv-review b feat/x --base develop` | `gv review b feat/x --base develop` |
+| `/gv-review l 3` | `gv review l 3` |
+| `/gv-review main..HEAD -w` | `gv review main..HEAD -w` |
+
+Arguments for this invocation: `$ARGUMENTS`
+
+If that is empty (or still reads as a placeholder because you invoked this
+skill yourself), choose them: nothing for a first review, `s` when
+re-requesting review after addressing one. Pass the arguments through as
+separate words; they must be gv targets and flags (`gv --help` lists them).
+Never pass anything else to the shell.
+
 ## 1. Open the review
 
 Run gv in the background (Bash with `run_in_background: true`). It may not be on
 the shell's PATH, so prefix it:
 
 ```sh
-PATH="$HOME/.cargo/bin:$PATH" gv review        # first review: everything on the branch
-PATH="$HOME/.cargo/bin:$PATH" gv review s      # re-review: only changes since the last review
+PATH="$HOME/.cargo/bin:$PATH" gv review <args>
 ```
 
-- Run it from the repository (or pass `-C <repo>`). Other targets work too, e.g.
-  `gv review b feat/x`.
+- Run it from the repository, or pass `-C <repo>` in the arguments.
 - gv opens the browser itself. The first stdout line is the URL: wait for it to
   appear in the background task's output file (use Monitor with an until-loop,
   not repeated sleeps), then give the user the URL and say the review is open.
@@ -41,18 +61,25 @@ PATH="$HOME/.cargo/bin:$PATH" gv review s      # re-review: only changes since t
 ## Comments
 ### 1. path/to/file.rb:42
 ~~~diff
-<the diff lines leading up to the commented line; the last one is it>
+<a few diff lines ending with the commented line>
+~~~
+<comment>
+### 2. path/to/file.rb:50-58
+~~~diff
+<exactly the commented block>
 ~~~
 <comment>
 ...
 </gv-review>
 ```
 
-- `path:line` is a line in the version that was reviewed. A comment marked
-  "removed line" refers to a line number in the old version.
-- The last line of each excerpt is the exact line commented on. Line numbers may
-  have moved if files changed since, so locate code by the excerpt, not only
-  the number.
+- `path:line` is a single line and `path:a-b` a block, in the version that was
+  reviewed. "removed line(s)" means line numbers in the old version, and
+  "replacing removed old lines" marks a block covering both removed and added
+  lines.
+- A single-line excerpt ends with the commented line; a block's excerpt is the
+  whole block. Line numbers may have moved if files changed since, so locate
+  code by the excerpt, not only the number.
 
 Act on the verdict:
 

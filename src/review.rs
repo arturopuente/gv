@@ -39,10 +39,12 @@ fn not_reviewing() -> Response {
 #[derive(Deserialize)]
 struct NewComment {
     generation: u64,
-    /// File, hunk and row index in that snapshot.
+    /// File, hunk and row index in that snapshot. `r0` (default `r`) is the
+    /// first row of a multi-line block; blocks stay within one hunk.
     i: usize,
     h: usize,
     r: usize,
+    r0: Option<usize>,
     body: String,
 }
 
@@ -64,11 +66,18 @@ async fn add_comment(State(app): State<Arc<App>>, Json(c): Json<NewComment>) -> 
     else {
         return (StatusCode::NOT_FOUND, "no such line").into_response();
     };
+    let r0 = c.r0.unwrap_or(c.r);
+    if r0 > c.r {
+        return (StatusCode::BAD_REQUEST, "block must start before it ends").into_response();
+    }
     let (side, no, blob) = match line.kind {
         Kind::Del => ("o", line.old_no, &f.old_blob),
         _ => ("n", line.new_no, &f.new_blob),
     };
-    let excerpt = hunk.lines[c.r.saturating_sub(3)..=c.r]
+    let block = &hunk.lines[r0..=c.r];
+    // A single line gets a little context above it; a block is shown as-is.
+    let from = if r0 == c.r { c.r.saturating_sub(3) } else { r0 };
+    let excerpt = hunk.lines[from..=c.r]
         .iter()
         .map(|l| {
             let sign = match l.kind {
@@ -86,6 +95,8 @@ async fn add_comment(State(app): State<Arc<App>>, Json(c): Json<NewComment>) -> 
         side: side.into(),
         line: no,
         blob: blob.clone(),
+        span: block.len() as u32,
+        loc: location(block),
         excerpt,
         context: if snap.view.is_empty() {
             String::new()
@@ -202,6 +213,40 @@ async fn submit(State(app): State<Arc<App>>, Json(s): Json<Submit>) -> Response 
     }
 }
 
+/// Where a block of rows is, for humans and agents: new-file line numbers
+/// when the block has any, else old ones (removed lines).
+pub fn location(rows: &[crate::diff::Line]) -> String {
+    let range = |nos: Vec<u32>| -> Option<String> {
+        let (a, b) = (*nos.iter().min()?, *nos.iter().max()?);
+        Some(if a == b {
+            a.to_string()
+        } else {
+            format!("{a}-{b}")
+        })
+    };
+    let new = range(
+        rows.iter()
+            .filter(|l| l.kind != Kind::Del)
+            .map(|l| l.new_no)
+            .collect(),
+    );
+    let old = range(
+        rows.iter()
+            .filter(|l| l.kind == Kind::Del)
+            .map(|l| l.old_no)
+            .collect(),
+    );
+    match (new, old) {
+        (Some(n), None) => n,
+        (Some(n), Some(o)) => format!("{n} (replacing removed old lines {o})"),
+        (None, Some(o)) if rows.len() == 1 => {
+            format!("{o} (removed line; line number in the old version)")
+        }
+        (None, Some(o)) => format!("{o} (removed lines; line numbers in the old version)"),
+        (None, None) => String::new(),
+    }
+}
+
 /// The review as markdown for an agent: verdict, summary, then each comment
 /// with its location and the diff lines it refers to.
 pub fn format_review(
@@ -239,17 +284,19 @@ pub fn format_review(
         let _ = writeln!(o, "## Comments\n");
     }
     for (n, c) in comments.iter().enumerate() {
-        let side = if c.side == "o" {
-            " (removed line; line number in the old version)"
+        let loc = if !c.loc.is_empty() {
+            c.loc.clone()
+        } else if c.side == "o" {
+            format!("{} (removed line; line number in the old version)", c.line)
         } else {
-            ""
+            c.line.to_string()
         };
         let ctx = if c.context.is_empty() {
             String::new()
         } else {
             format!(" — written while viewing {}", c.context)
         };
-        let _ = writeln!(o, "### {}. {}:{}{side}{ctx}\n", n + 1, c.path, c.line);
+        let _ = writeln!(o, "### {}. {}:{loc}{ctx}\n", n + 1, c.path);
         let fence = if c.excerpt.contains("~~~") {
             "````"
         } else {
@@ -274,6 +321,8 @@ mod tests {
             side: "n".into(),
             line: 42,
             blob: "abc".into(),
+            span: 1,
+            loc: "42".into(),
             excerpt: " def x\n+  y".into(),
             context: String::new(),
             body: "Rename this.".into(),
@@ -290,5 +339,36 @@ mod tests {
         assert!(md.contains("# Review 2 on feat/x: changes requested"));
         assert!(md.contains("### 1. app/foo.rb:42\n\n~~~diff\n def x\n+  y\n~~~\n\nRename this."));
         assert!(md.trim_end().ends_with("</gv-review>"));
+    }
+
+    fn row(kind: Kind, old_no: u32, new_no: u32) -> crate::diff::Line {
+        crate::diff::Line {
+            kind,
+            old_no,
+            new_no,
+            text: String::new(),
+        }
+    }
+
+    #[test]
+    fn block_locations() {
+        use Kind::*;
+        assert_eq!(location(&[row(Add, 0, 7)]), "7");
+        assert_eq!(
+            location(&[row(Del, 5, 0)]),
+            "5 (removed line; line number in the old version)"
+        );
+        assert_eq!(
+            location(&[row(Ctx, 9, 10), row(Add, 0, 11), row(Add, 0, 12)]),
+            "10-12"
+        );
+        assert_eq!(
+            location(&[row(Del, 20, 0), row(Del, 21, 0), row(Add, 0, 20)]),
+            "20 (replacing removed old lines 20-21)"
+        );
+        assert_eq!(
+            location(&[row(Del, 3, 0), row(Del, 4, 0)]),
+            "3-4 (removed lines; line numbers in the old version)"
+        );
     }
 }

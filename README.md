@@ -153,7 +153,7 @@ Key handling uses `event.code` (so `Shift+1` / `Alt+1` work regardless of the ch
 The workflow mirrors reviewing a coworker's pull request, with an AI agent as the coworker:
 
 1. The agent runs `gv review` (or `gv review s` for a re-review) as a background command and hands the user the URL.
-2. The user clicks line numbers to leave comments (on added, removed or context lines), writes a summary, and submits with a verdict: **Comment**, **Approve** or **Request changes**. Drafts (comments and summary) are saved as they're written, so closing the tab or killing gv loses nothing; `gv review` resumes the branch's draft.
+2. The user clicks a line number to comment on a line, or drags across line numbers (or clicks then Shift-clicks) to comment on a block within a hunk, on added, removed or context lines; writes a summary, and submits with a verdict: **Comment**, **Approve** or **Request changes**. Drafts (comments and summary) are saved as they're written, so closing the tab or killing gv loses nothing; `gv review` resumes the branch's draft.
 3. On submit gv pins the reviewed snapshot (§6.3), saves the review to `<git-common-dir>/gv/reviews/<branch>-<n>.md`, prints it to stdout and exits 0. The agent that started gv is notified of the exit and receives the review. Exit 2 means the session ended without a submit.
 4. On **Request changes** the agent addresses every comment, commits the round as `Address review <n>`, and re-requests review with `gv review s`, so the next round shows only what changed since.
 
@@ -177,9 +177,9 @@ Output format (stable; agents parse it):
 </gv-review>
 ```
 
-Comments anchor to `(path, side, line, blob)`; side `o` marks a removed line (old line number). A comment whose line isn't in the current view's diff is shown at the top of its file as outdated. Only `gv review` exposes the review endpoints; plain `gv` returns 404 for them.
+Comments anchor to `(path, side, line, blob)` of their last row plus a `span` of rows; side `o` marks a removed line (old line number). Blocks print as `path:a-b` with the block as the excerpt. A comment whose line isn't in the current view's diff is shown at the top of its file as outdated. Only `gv review` exposes the review endpoints; plain `gv` returns 404 for them.
 
-Agents learn the protocol from the `gv-review` Claude Code skill in `skills/gv-review/` (symlink it into `~/.claude/skills/` to use it in every project).
+Agents learn the protocol from the `gv-review` Claude Code skill in `skills/gv-review/` (symlink it into `~/.claude/skills/` to use it in every project). Invoked as `/gv-review <args>`, the arguments are passed through to `gv review <args>` (e.g. `/gv-review s`).
 
 ## 7. Architecture
 

@@ -17,7 +17,7 @@
       {% if files %}<button id="allbtn" type="button" title="Shift+Tab">Collapse all</button>{% endif %}
       {% if reviewing %}<button id="finish" type="button" class="primary">Finish review <span id="rvcount"></span></button>{% endif %}
     </div>
-    {% if reviewing %}<div class="rvnote">Reviewing <b>{{ branch }}</b> · click a line number to comment</div>{% endif %}
+    {% if reviewing %}<div class="rvnote">Reviewing <b>{{ branch }}</b> · click a line number to comment; drag or Shift-click for a block</div>{% endif %}
   </div>
   <input id="filter" type="search" placeholder="Filter files  /" autocomplete="off" spellcheck="false">
   {% if commits or uncommitted or has_since %}

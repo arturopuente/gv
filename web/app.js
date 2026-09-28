@@ -467,7 +467,8 @@
     const el = document.createElement('div');
     el.className = 'cmt';
     el.dataset.id = c.id;
-    const where = outdated ? `${c.side === 'o' ? 'old ' : ''}line ${c.line}` : '';
+    const loc = c.loc || `${c.side === 'o' ? 'old ' : ''}${c.line}`;
+    const where = outdated || c.span > 1 ? `line${c.span > 1 ? 's' : ''} ${loc}` : '';
     el.innerHTML = `<div class="cmt-h"><b>You</b><span class="where"></span><span class="sp"></span>
       <button type="button" data-act="edit">Edit</button><button type="button" data-act="del">Delete</button></div><div class="cmt-b"></div>`;
     el.querySelector('.where').textContent = where;
@@ -539,22 +540,48 @@
     return form;
   }
 
-  function openNewComment(row) {
-    const sec = row.closest('section.file'), i = +sec.dataset.i;
-    const hk = row.closest('.hk'), h = +hk.dataset.h;
-    const r = [...hk.children].filter((el) => el.classList.contains('l')).indexOf(row);
+  const hunkRows = (hk) => [...hk.children].filter((el) => el.classList.contains('l'));
+  const markRows = (rows, cls, on) => rows.forEach((r) => r.classList.toggle(cls, on));
+
+  // Rows from a to b (either order) within their hunk.
+  function blockRows(a, b) {
+    const rows = hunkRows(a.closest('.hk'));
+    let x = rows.indexOf(a), y = rows.indexOf(b);
+    if (x > y) [x, y] = [y, x];
+    return rows.slice(x, y + 1);
+  }
+
+  // The rows a posted comment covers: its anchor row and span-1 rows above.
+  function commentRows(el) {
+    let row = el.previousElementSibling;
+    while (row && !row.classList.contains('l')) row = row.previousElementSibling;
+    const c = R.comments.find((x) => x.id === +el.dataset.id);
+    if (!row || !c) return [];
+    const rows = hunkRows(row.closest('.hk'));
+    const end = rows.indexOf(row);
+    return rows.slice(Math.max(0, end - (c.span || 1) + 1), end + 1);
+  }
+
+  function openNewComment(startRow, endRow) {
+    const rows = blockRows(startRow, endRow);
+    const first = rows[0], last = rows[rows.length - 1];
+    const sec = last.closest('section.file'), i = +sec.dataset.i;
+    const hk = last.closest('.hk'), h = +hk.dataset.h;
+    const all = hunkRows(hk);
+    const r0 = all.indexOf(first), r = all.indexOf(last);
+    markRows(rows, 'rsel', true); // keep the block highlighted while writing
     let form;
-    const close = () => anchored(() => { form.remove(); refit(i); });
+    const close = () => anchored(() => { markRows(rows, 'rsel', false); form.remove(); refit(i); });
     form = commentForm('', async (body) => {
-      const res = await post('/review/comment', { generation: M.generation, i, h, r, body });
+      const res = await post('/review/comment', { generation: M.generation, i, h, r, r0, body });
       if (res.status === 409) return reloadAt(files[i].path);
       if (!res.ok) throw new Error(await res.text());
       const c = await res.json();
       R.comments.push(c);
-      anchored(() => { form.replaceWith(commentEl(c, false)); refit(i); });
+      anchored(() => { markRows(rows, 'rsel', false); form.replaceWith(commentEl(c, false)); refit(i); });
       updateCounts();
     }, close);
-    anchored(() => { insertAfterRow(row, form); refit(i); });
+    anchored(() => { insertAfterRow(last, form); refit(i); });
   }
 
   function onCommentAction(el, act) {
@@ -590,8 +617,46 @@
       const act = e.target.dataset && e.target.dataset.act;
       const cmt = e.target.closest('.cmt');
       if (cmt && (act === 'edit' || act === 'del')) return onCommentAction(cmt, act);
-      const num = e.target.closest('.l .o, .l .n');
-      if (num && !String(window.getSelection())) openNewComment(num.parentElement);
+    });
+
+    // Line numbers: click for one line; drag, or click then Shift-click, for
+    // a block (within one hunk, like GitHub).
+    let drag = null, anchor = null;
+    main.addEventListener('mousedown', (e) => {
+      const num = e.button === 0 && e.target.closest('.l > .o, .l > .n');
+      if (!num) return;
+      e.preventDefault(); // no text selection while dragging
+      const row = num.parentElement;
+      const sameHunk = anchor && anchor.isConnected && anchor.closest('.hk') === row.closest('.hk');
+      const start = e.shiftKey && sameHunk ? anchor : row;
+      drag = { start, rows: blockRows(start, row), end: row };
+      markRows(drag.rows, 'rsel', true);
+    });
+    main.addEventListener('mouseover', (e) => {
+      if (!drag) return;
+      const row = e.target.closest('.l');
+      if (!row || row === drag.end || row.closest('.hk') !== drag.start.closest('.hk')) return;
+      markRows(drag.rows, 'rsel', false);
+      drag.end = row;
+      drag.rows = blockRows(drag.start, row);
+      markRows(drag.rows, 'rsel', true);
+    });
+    window.addEventListener('mouseup', () => {
+      if (!drag) return;
+      const d = drag;
+      drag = null;
+      markRows(d.rows, 'rsel', false);
+      anchor = d.start;
+      openNewComment(d.start, d.end);
+    });
+    // Hovering a comment shows which lines it covers.
+    main.addEventListener('mouseover', (e) => {
+      const el = e.target.closest('.cmt');
+      if (el && !el.classList.contains('hl')) { el.classList.add('hl'); markRows(commentRows(el), 'rhl', true); }
+    });
+    main.addEventListener('mouseout', (e) => {
+      const el = e.target.closest('.cmt');
+      if (el && !el.contains(e.relatedTarget)) { el.classList.remove('hl'); markRows(commentRows(el), 'rhl', false); }
     });
 
     const dlg = document.getElementById('rvdlg');

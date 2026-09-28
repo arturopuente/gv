@@ -142,8 +142,13 @@ section.cur .fh { box-shadow: inset 3px 0 0 var(--cur); }
 }
 
 /* Review comments */
-.reviewing .l .o, .reviewing .l .n { cursor: pointer; }
-.reviewing .l .o:hover, .reviewing .l .n:hover { background: var(--cur); color: #fff; opacity: 1; }
+/* The two number cells (old, new) act as one gutter target per row. */
+.reviewing .l > .o, .reviewing .l > .n { cursor: pointer; }
+.reviewing .l:has(> .o:hover, > .n:hover) > .o,
+.reviewing .l:has(> .o:hover, > .n:hover) > .n { background: var(--cur-bg); color: var(--cur); opacity: 1; }
+.l.rsel > .o, .l.rsel > .n { background: var(--cur) !important; color: #fff !important; opacity: 1; }
+.l.rsel, .l.rhl { background: color-mix(in srgb, var(--cur) 14%, var(--bg)) !important; }
+.l.rhl > .o, .l.rhl > .n { background: color-mix(in srgb, var(--cur) 35%, var(--bg)) !important; opacity: 1; }
 .cmt, .cmt-form {
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 13px; line-height: 1.45;
   margin: 6px 12px 8px calc(2 * (var(--gd) * 1ch + var(--gp)) + 2ch);
