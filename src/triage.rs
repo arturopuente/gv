@@ -212,8 +212,12 @@ fn sensitive(path: &str, cfg: &Config) -> Option<&'static str> {
     if name.starts_with(".env") {
         return Some("environment");
     }
-    if p.split(['/', '.', '_', '-'])
-        .any(|w| SECURITY_WORDS.contains(&w))
+    // Path words are a weak hint of security code; in a test or a doc they
+    // mean the file is about it, not that it is it.
+    if !is_test(path)
+        && !is_doc(path)
+        && p.split(['/', '.', '_', '-'])
+            .any(|w| SECURITY_WORDS.contains(&w))
     {
         return Some("security");
     }
@@ -351,6 +355,8 @@ mod tests {
         assert_eq!(tier("db/migrate/1.rb"), Tier::Sensitive);
         assert_eq!(tier("app/lib/auth_helper.rb"), Tier::Sensitive);
         assert_eq!(tier("app/models/author.rb"), Tier::Code);
+        assert_eq!(tier("spec/lib/auth_helper_spec.rb"), Tier::Tests);
+        assert_eq!(tier("docs/auth.md"), Tier::Docs);
         assert_eq!(tier("Cargo.toml"), Tier::Sensitive);
         assert_eq!(tier("yarn.lock"), Tier::Mechanical);
         assert_eq!(tier("spec/models/user_spec.rb"), Tier::Tests);

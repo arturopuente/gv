@@ -210,7 +210,7 @@ Regenerated; no hand edits.
 | Tier | What |
 |---|---|
 | Flagged by the agent | files with a `[check]` note |
-| Sensitive | migrations, SQL, CI, Docker/Terraform, dependency manifests, `.env*`, auth/security/crypto/secret paths, `[sensitive] patterns` |
+| Sensitive | migrations, SQL, CI, Docker/Terraform, dependency manifests, `.env*`, auth/security/crypto/secret paths (except tests and docs), `[sensitive] patterns` |
 | Code | everything else |
 | Tests | `test/`, `spec/`, `__tests__/`, `*_test.*`, `*.spec.*`, ... |
 | Docs | `docs/`, `*.md`, `*.rst`, ... |
