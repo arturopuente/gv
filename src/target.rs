@@ -77,7 +77,9 @@ fn or_head(s: &str) -> String {
 const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
 
+#[derive(Clone)]
 pub struct Commit {
+    pub sha: String,
     pub short: String,
     pub subject: String,
     pub author: String,
@@ -90,6 +92,8 @@ pub struct Resolved {
     /// Commit or tree to diff to (a snapshot tree for the working tree).
     pub head: String,
     pub commits: Vec<Commit>,
+    /// `head` is a working-tree snapshot, not a commit.
+    pub worktree: bool,
 }
 
 pub fn resolve(t: &Target, git: &Git, base_override: Option<&str>) -> Result<Resolved> {
@@ -112,6 +116,7 @@ pub fn resolve(t: &Target, git: &Git, base_override: Option<&str>) -> Result<Res
                 base,
                 head,
                 commits,
+                worktree: true,
             })
         }
         Target::Branch(name) => {
@@ -133,16 +138,14 @@ pub fn resolve(t: &Target, git: &Git, base_override: Option<&str>) -> Result<Res
                 base,
                 head,
                 commits,
+                worktree: false,
             })
         }
         Target::Commit(rev) => {
             let head = git
                 .commit(rev)
                 .ok_or_else(|| anyhow!("no such commit: {rev}"))?;
-            let base = match git.commit(&format!("{head}^")) {
-                Some(p) => p,
-                None => git.empty_tree()?,
-            };
+            let base = parent_or_empty(git, &head)?;
             let commits = log(git, &base, &head)?;
             let label = match commits.first() {
                 Some(c) => format!("{} {}", c.short, c.subject),
@@ -153,6 +156,7 @@ pub fn resolve(t: &Target, git: &Git, base_override: Option<&str>) -> Result<Res
                 base,
                 head,
                 commits,
+                worktree: false,
             })
         }
         Target::Last(n) => {
@@ -175,6 +179,7 @@ pub fn resolve(t: &Target, git: &Git, base_override: Option<&str>) -> Result<Res
                 base,
                 head,
                 commits,
+                worktree: false,
             })
         }
         Target::Range {
@@ -198,8 +203,17 @@ pub fn resolve(t: &Target, git: &Git, base_override: Option<&str>) -> Result<Res
                 base,
                 head: to_sha,
                 commits,
+                worktree: false,
             })
         }
+    }
+}
+
+/// First parent of `sha`, or the empty tree for a root commit.
+pub fn parent_or_empty(git: &Git, sha: &str) -> Result<String> {
+    match git.commit(&format!("{sha}^")) {
+        Some(p) => Ok(p),
+        None => git.empty_tree(),
     }
 }
 
@@ -215,7 +229,7 @@ fn log(git: &Git, base: &str, head: &str) -> Result<Vec<Commit>> {
         "--first-parent",
         "--reverse",
         "--max-count=500",
-        "--format=%h%x1f%s%x1f%an%x1e",
+        "--format=%H%x1f%h%x1f%s%x1f%an%x1e",
         &range,
     ])?;
     Ok(out
@@ -223,6 +237,7 @@ fn log(git: &Git, base: &str, head: &str) -> Result<Vec<Commit>> {
         .filter_map(|rec| {
             let mut f = rec.trim_matches('\n').split('\x1f');
             Some(Commit {
+                sha: f.next()?.to_string(),
                 short: f.next()?.to_string(),
                 subject: f.next()?.to_string(),
                 author: f.next()?.to_string(),

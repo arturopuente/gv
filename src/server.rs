@@ -9,7 +9,7 @@ use crate::target::{self, Commit, Target};
 use anyhow::Result;
 use axum::{
     Json, Router,
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -30,7 +30,14 @@ pub struct Snapshot {
     pub generation: u64,
     pub label: String,
     pub files: Vec<FileDiff>,
+    /// Commits of the whole target (views keep the full list for navigation).
     pub commits: Vec<Commit>,
+    /// Diff head: a commit, or the working-tree snapshot tree.
+    pub head: String,
+    /// Working-tree target with changes beyond HEAD.
+    pub uncommitted: bool,
+    /// "" for the whole target, a commit sha, or "wt" for uncommitted changes.
+    pub view: String,
 }
 
 pub struct App {
@@ -43,6 +50,8 @@ pub struct App {
     pub token: String,
     pub port: u16,
     pub snap: RwLock<Arc<Snapshot>>,
+    /// Per-commit / uncommitted views of the current snapshot, by view key.
+    views: Mutex<HashMap<String, Arc<Snapshot>>>,
     cache: Mutex<HashMap<String, Arc<String>>>,
 }
 
@@ -56,21 +65,24 @@ pub fn build_snapshot(
     base_override: Option<&str>,
 ) -> Result<Snapshot> {
     let r = target::resolve(t, git, base_override)?;
-    let files = diff::diff(
-        git,
-        &r.base,
-        &r.head,
-        &DiffOpts {
-            context: cfg.context,
-            ignore_whitespace: cfg.ignore_whitespace,
-        },
-    )?;
+    let files = diff::diff(git, &r.base, &r.head, &diff_opts(cfg))?;
+    let uncommitted = r.worktree && git.rev("HEAD^{tree}").as_deref() != Some(r.head.as_str());
     Ok(Snapshot {
         generation: GENERATION.fetch_add(1, Ordering::Relaxed),
         label: r.label,
         files,
         commits: r.commits,
+        head: r.head,
+        uncommitted,
+        view: String::new(),
     })
+}
+
+fn diff_opts(cfg: &Config) -> DiffOpts {
+    DiffOpts {
+        context: cfg.context,
+        ignore_whitespace: cfg.ignore_whitespace,
+    }
 }
 
 impl App {
@@ -96,12 +108,71 @@ impl App {
             token,
             port,
             snap: RwLock::new(Arc::new(snap)),
+            views: Mutex::new(HashMap::new()),
             cache: Mutex::new(HashMap::new()),
         }
     }
 
     fn snap(&self) -> Arc<Snapshot> {
         self.snap.read().unwrap().clone()
+    }
+
+    /// The snapshot for a view: "" (whole target), a commit from the target's
+    /// commit list, or "wt" (uncommitted changes). Only those are accepted, so
+    /// the URL can't make gv run arbitrary revisions.
+    fn view(&self, v: &str) -> Result<Arc<Snapshot>> {
+        let main = self.snap();
+        if v.is_empty() {
+            return Ok(main);
+        }
+        let key = format!("{}:{v}", main.generation);
+        if let Some(s) = self.views.lock().unwrap().get(&key) {
+            return Ok(s.clone());
+        }
+        let (base, head, label) = if v == "wt" {
+            if !main.uncommitted {
+                anyhow::bail!("no uncommitted changes");
+            }
+            let base = match self.git.commit("HEAD") {
+                Some(h) => h,
+                None => self.git.empty_tree()?,
+            };
+            (base, main.head.clone(), "uncommitted changes".to_string())
+        } else {
+            let c = main
+                .commits
+                .iter()
+                .find(|c| c.sha == v)
+                .ok_or_else(|| anyhow::anyhow!("not a commit in this review: {v}"))?;
+            let base = target::parent_or_empty(&self.git, &c.sha)?;
+            (base, c.sha.clone(), format!("{} {}", c.short, c.subject))
+        };
+        let files = diff::diff(&self.git, &base, &head, &diff_opts(&self.cfg))?;
+        let snap = Arc::new(Snapshot {
+            generation: GENERATION.fetch_add(1, Ordering::Relaxed),
+            label,
+            files,
+            commits: main.commits.clone(),
+            head,
+            uncommitted: main.uncommitted,
+            view: v.to_string(),
+        });
+        self.views.lock().unwrap().insert(key, snap.clone());
+        Ok(snap)
+    }
+
+    /// Any live snapshot (whole target or a view) by generation.
+    fn by_generation(&self, generation: u64) -> Option<Arc<Snapshot>> {
+        let main = self.snap();
+        if main.generation == generation {
+            return Some(main);
+        }
+        self.views
+            .lock()
+            .unwrap()
+            .values()
+            .find(|s| s.generation == generation)
+            .cloned()
     }
 
     fn cookie_name(&self) -> String {
@@ -219,16 +290,31 @@ async fn theme_css() -> Response {
         .into_response()
 }
 
-async fn shell(State(app): State<Arc<App>>) -> Response {
-    match tokio::task::spawn_blocking(move || render_shell(&app)).await {
+#[derive(Deserialize)]
+struct ShellQuery {
+    #[serde(default)]
+    v: String,
+}
+
+async fn shell(State(app): State<Arc<App>>, Query(q): Query<ShellQuery>) -> Response {
+    let is_view = !q.v.is_empty();
+    match tokio::task::spawn_blocking(move || render_shell(&app, &q.v)).await {
         Ok(Ok(html)) => Html(html).into_response(),
+        Ok(Err(e)) if is_view => (
+            StatusCode::NOT_FOUND,
+            Html(format!(
+                "<p>{}</p><p><a href=\"/\">Back to all changes</a></p>",
+                escape(&format!("{e:#}"))
+            )),
+        )
+            .into_response(),
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
-fn render_shell(app: &App) -> Result<String> {
-    let snap = app.snap();
+fn render_shell(app: &App, view: &str) -> Result<String> {
+    let snap = app.view(view)?;
     let tw = app.cfg.tab_width;
     let mut mfiles = Vec::with_capacity(snap.files.len());
     for f in &snap.files {
@@ -273,7 +359,7 @@ fn render_shell(app: &App) -> Result<String> {
     let commits: Vec<_> = snap
         .commits
         .iter()
-        .map(|c| minijinja::context! { short => c.short, subject => c.subject, author => c.author })
+        .map(|c| minijinja::context! { sha => c.sha, short => c.short, subject => c.subject, author => c.author })
         .collect();
     let repo = app
         .git
@@ -282,7 +368,8 @@ fn render_shell(app: &App) -> Result<String> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     Ok(env.get_template("shell.html")?.render(minijinja::context! {
-        repo, label => snap.label, files, commits, total_add => snap.files.iter().map(|f| f.add).sum::<u32>(),
+        repo, label => snap.label, files, commits, view => snap.view, uncommitted => snap.uncommitted,
+        total_add => snap.files.iter().map(|f| f.add).sum::<u32>(),
         total_del => snap.files.iter().map(|f| f.del).sum::<u32>(), model_json,
     })?)
 }
@@ -291,10 +378,9 @@ async fn file_fragment(
     State(app): State<Arc<App>>,
     Path((generation, i)): Path<(u64, usize)>,
 ) -> Response {
-    let snap = app.snap();
-    if snap.generation != generation {
+    let Some(snap) = app.by_generation(generation) else {
         return (StatusCode::CONFLICT, "stale snapshot").into_response();
-    }
+    };
     if i >= snap.files.len() {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -329,10 +415,9 @@ async fn set_viewed(
     Path((generation, i)): Path<(u64, usize)>,
     Json(body): Json<ViewedBody>,
 ) -> Response {
-    let snap = app.snap();
-    if snap.generation != generation {
+    let Some(snap) = app.by_generation(generation) else {
         return (StatusCode::CONFLICT, "stale snapshot").into_response();
-    }
+    };
     let Some(f) = snap.files.get(i) else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -363,6 +448,7 @@ async fn resnapshot(State(app): State<Arc<App>>) -> Response {
         );
         let generation = snap.generation;
         *app.snap.write().unwrap() = Arc::new(snap);
+        app.views.lock().unwrap().clear();
         anyhow::Ok(generation)
     })
     .await;

@@ -21,6 +21,10 @@ pub struct MFile<'a> {
     pub viewed: &'static str,
     /// Per hunk: display width of each row, tabs expanded.
     pub hunks: Vec<Vec<u32>>,
+    /// Per hunk: one char per row, `c`ontext / `a`dded / `d`eleted (minimap).
+    pub kinds: Vec<String>,
+    /// Per hunk: leading-whitespace width of each row (minimap code shape).
+    pub indent: Vec<Vec<u32>>,
 }
 
 pub fn model_file<'a>(f: &'a FileDiff, viewed: &'static str, tab_width: usize) -> MFile<'a> {
@@ -31,6 +35,27 @@ pub fn model_file<'a>(f: &'a FileDiff, viewed: &'static str, tab_width: usize) -
         .map(|l| l.old_no.max(l.new_no))
         .max()
         .unwrap_or(1);
+    let mut hunks = Vec::with_capacity(f.hunks.len());
+    let mut kinds = Vec::with_capacity(f.hunks.len());
+    let mut indent = Vec::with_capacity(f.hunks.len());
+    for h in &f.hunks {
+        let mut w = Vec::with_capacity(h.lines.len());
+        let mut k = String::with_capacity(h.lines.len());
+        let mut ind = Vec::with_capacity(h.lines.len());
+        for l in &h.lines {
+            let text = expand_tabs(&l.text, tab_width);
+            w.push(UnicodeWidthStr::width(text.as_ref()) as u32);
+            ind.push((text.len() - text.trim_start_matches(' ').len()) as u32);
+            k.push(match l.kind {
+                Kind::Ctx => 'c',
+                Kind::Add => 'a',
+                Kind::Del => 'd',
+            });
+        }
+        hunks.push(w);
+        kinds.push(k);
+        indent.push(ind);
+    }
     MFile {
         path: &f.path,
         old_path: f.old_path.as_deref(),
@@ -40,18 +65,9 @@ pub fn model_file<'a>(f: &'a FileDiff, viewed: &'static str, tab_width: usize) -
         note: f.note(),
         gd: digits(max_no),
         viewed,
-        hunks: f
-            .hunks
-            .iter()
-            .map(|h| {
-                h.lines
-                    .iter()
-                    .map(|l| {
-                        UnicodeWidthStr::width(expand_tabs(&l.text, tab_width).as_ref()) as u32
-                    })
-                    .collect()
-            })
-            .collect(),
+        hunks,
+        kinds,
+        indent,
     }
 }
 

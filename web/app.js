@@ -95,11 +95,32 @@
   // ---- levels & loading -----------------------------------------------------
 
   function setLevel(i, lvl) {
+    if (st[i].level !== lvl) { queueAllLabel(); mmSchedule(); }
     st[i].level = lvl;
     secs[i].classList.remove('lv1', 'lv2', 'lv3');
     secs[i].classList.add(`lv${lvl}`);
     sizeBody(i);
     if (lvl > 1) maybeLoad(i);
+  }
+
+  const expandLvl = () => (M.defaultLevel === 1 ? 3 : M.defaultLevel);
+  const anyOpen = () => st.some((s) => s.level > 1);
+
+  // Set every file's level, keeping the current file's header in view.
+  function setAll(lvl) {
+    const cur = current();
+    files.forEach((_, i) => setLevel(i, lvl));
+    if (cur >= 0) window.scrollTo(0, docTop(secs[cur]));
+  }
+
+  const toggleAll = () => setAll(anyOpen() ? 1 : expandLvl());
+
+  const allBtn = document.getElementById('allbtn');
+  let labelQueued = false;
+  function queueAllLabel() {
+    if (labelQueued || !allBtn) return;
+    labelQueued = true;
+    queueMicrotask(() => { labelQueued = false; allBtn.textContent = anyOpen() ? 'Collapse all' : 'Expand all'; });
   }
 
   function near(i) {
@@ -278,6 +299,129 @@
     dirs.forEach((d) => d.classList.toggle('hidden', q !== ''));
   }
 
+  // ---- minimap --------------------------------------------------------------------
+  // Whole-diff overview at VS Code's scale (a 20px line → 2px). Rows are drawn
+  // from the model (width, indent, kind), so unloaded files show too. When the
+  // diff is taller than the window, the minimap scrolls in proportion.
+
+  const mm = document.getElementById('minimap');
+  const mmCtx = mm && mm.getContext('2d');
+  const MS = 2 / LH;
+  const MM_COLS = 120; // columns that fit across the minimap
+  let mmColors = {};
+  let mmQueued = false;
+
+  function mmReadColors() {
+    const cs = getComputedStyle(document.documentElement);
+    const v = (n) => cs.getPropertyValue(n).trim();
+    mmColors = { add: v('--add-fg'), del: v('--del-fg'), ctx: v('--muted'), file: v('--border'), hunk: v('--cur') };
+  }
+
+  function mmGeom() {
+    const H = window.innerHeight, D = document.documentElement.scrollHeight;
+    const travel = Math.max(0, D * MS - H);
+    const frac = D > H ? window.scrollY / (D - H) : 0;
+    // How far the viewport box moves per pixel of page scroll.
+    const ratio = MS - (D > H ? travel / (D - H) : 0);
+    return { H, D, off: frac * travel, ratio };
+  }
+
+  function mmSchedule() {
+    if (mmQueued || !mmCtx) return;
+    mmQueued = true;
+    requestAnimationFrame(() => { mmQueued = false; mmDraw(); });
+  }
+
+  function mmDraw() {
+    if (!mmCtx || !secs.length || mm.clientWidth === 0) return; // hidden on narrow screens
+    const dpr = window.devicePixelRatio || 1;
+    const W = mm.clientWidth, H = mm.clientHeight;
+    if (mm.width !== Math.round(W * dpr) || mm.height !== Math.round(H * dpr)) {
+      mm.width = Math.round(W * dpr);
+      mm.height = Math.round(H * dpr);
+    }
+    const c = mmCtx;
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    c.clearRect(0, 0, W, H);
+    const { off } = mmGeom();
+    const y0 = off / MS, y1 = (off + H) / MS; // document range the minimap shows
+    const cpx = (W - 8) / MM_COLS;
+    const line = LH * MS;
+
+    for (let i = sectionAt(y0); i < secs.length; i++) {
+      const top = docTop(secs[i]);
+      if (top > y1) break;
+      const f = files[i];
+      c.globalAlpha = 1;
+      c.fillStyle = mmColors.file;
+      c.fillRect(0, top * MS - off, W, Math.max(1, FH * MS));
+      if (st[i].level === 1 || f.note) continue;
+      const cl = cols(f.gd);
+      let y = docTop(bodies[i]);
+      for (let h = 0; h < f.hunks.length && y <= y1; h++) {
+        c.globalAlpha = 0.18;
+        c.fillStyle = mmColors.hunk;
+        c.fillRect(0, y * MS - off, W, HH * MS);
+        y += HH;
+        if (st[i].level < 3) continue;
+        const ws = f.hunks[h], ks = f.kinds[h], ind = f.indent[h];
+        for (let r = 0; r < ws.length && y <= y1; r++) {
+          const n = Math.max(1, Math.ceil(ws[r] / cl)), rh = n * LH;
+          if (y + rh >= y0) {
+            const k = ks[r], my = y * MS - off;
+            const color = k === 'a' ? mmColors.add : k === 'd' ? mmColors.del : mmColors.ctx;
+            if (k !== 'c') {
+              c.globalAlpha = 0.16;
+              c.fillStyle = color;
+              c.fillRect(0, my, W, rh * MS);
+            }
+            c.globalAlpha = k === 'c' ? 0.4 : 0.9;
+            c.fillStyle = color;
+            for (let v = 0; v < n; v++) { // one bar per wrapped visual line
+              const start = v === 0 ? ind[r] : 0;
+              const end = Math.min(ws[r] - v * cl, cl, MM_COLS);
+              if (end > start) c.fillRect(4 + start * cpx, my + v * line + 0.4, (end - start) * cpx, line - 0.8);
+            }
+          }
+          y += rh;
+        }
+      }
+    }
+    // Viewport box.
+    const by = window.scrollY * MS - off, bh = H * MS;
+    c.globalAlpha = 0.14;
+    c.fillStyle = mmColors.ctx;
+    c.fillRect(0, by, W, bh);
+    c.globalAlpha = 0.6;
+    c.strokeStyle = mmColors.ctx;
+    c.lineWidth = 1;
+    c.strokeRect(0.5, Math.round(by) + 0.5, W - 1, Math.max(1, Math.round(bh) - 1));
+    c.globalAlpha = 1;
+  }
+
+  function initMinimap() {
+    if (!mmCtx) return;
+    mmReadColors();
+    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { mmReadColors(); mmSchedule(); });
+    let drag = null;
+    mm.addEventListener('pointerdown', (e) => {
+      const { off, H, ratio } = mmGeom();
+      const boxTop = window.scrollY * MS - off;
+      // Outside the viewport box: jump so the clicked point is centered.
+      if (e.offsetY < boxTop || e.offsetY > boxTop + H * MS) window.scrollTo(0, (e.offsetY + off) / MS - H / 2);
+      drag = { y: e.clientY, scroll: window.scrollY, ratio };
+      mm.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    mm.addEventListener('pointermove', (e) => {
+      if (drag && drag.ratio > 1e-6) window.scrollTo(0, drag.scroll + (e.clientY - drag.y) / drag.ratio);
+    });
+    const end = () => { drag = null; };
+    mm.addEventListener('pointerup', end);
+    mm.addEventListener('pointercancel', end);
+    mmSchedule();
+  }
+
   // ---- keyboard -----------------------------------------------------------------
 
   let lastG = 0;
@@ -299,13 +443,16 @@
       const lvl = +digit[1];
       const cur = current();
       if (cur < 0) return;
-      if (e.altKey) files.forEach((_, i) => setLevel(i, lvl));
-      else setLevel(cur, lvl);
-      if (docTop(secs[cur]) < window.scrollY) window.scrollTo(0, docTop(secs[cur]));
+      if (e.shiftKey || e.altKey) setAll(lvl);
+      else {
+        setLevel(cur, lvl);
+        if (docTop(secs[cur]) < window.scrollY) window.scrollTo(0, docTop(secs[cur]));
+      }
       e.preventDefault();
       return;
     }
     if (e.altKey) return;
+    if (e.key === 'Tab' && e.shiftKey) { toggleAll(); e.preventDefault(); return; }
 
     const cur = current();
     switch (e.key) {
@@ -328,6 +475,14 @@
       case 'G': window.scrollTo(0, document.documentElement.scrollHeight); break;
       case '/': filter.focus(); filter.select(); break;
       case 'r': resnapshot(); break;
+      case '[': case ']': {
+        // Step through views: All changes → each commit → uncommitted.
+        const links = [...document.querySelectorAll('#views .cm')];
+        const at = links.findIndex((a) => a.classList.contains('sel'));
+        const next = links[at + (e.key === ']' ? 1 : -1)];
+        if (next) location.href = next.href;
+        break;
+      }
       case '?': help.hidden = !help.hidden; break;
       default: return;
     }
@@ -341,29 +496,44 @@
       measure();
       files.forEach((_, i) => sizeBody(i));
     });
+    mmSchedule();
   }
 
   function init() {
     measure();
     files.forEach((_, i) => setLevel(i, st[i].level));
+    queueAllLabel();
+    initMinimap();
     bodies.forEach((b, i) => { b.dataset.i = i; io.observe(b); });
     initBars();
 
     secs.forEach((s, i) => {
       s.querySelector('.vw input').addEventListener('click', (e) => { e.preventDefault(); setViewed(i, files[i].viewed !== 'v'); });
-      s.querySelector('.tw').addEventListener('click', () => {
+      const toggle = () => {
+        if (String(window.getSelection())) return; // selecting the path to copy it, not toggling
         setLevel(i, st[i].level === 1 ? 3 : 1);
         if (docTop(secs[i]) < window.scrollY) window.scrollTo(0, docTop(secs[i]));
-      });
+      };
+      s.querySelector('.tw').addEventListener('click', toggle);
+      s.querySelector('.path').addEventListener('click', toggle);
     });
-    items.forEach((el, i) => el.addEventListener('click', (e) => { e.preventDefault(); scrollToFile(i); }));
+    // Sidebar click: jump to the file and expand it; clicking the file that's
+    // already open at the top collapses it instead.
+    items.forEach((el, i) => el.addEventListener('click', (e) => {
+      e.preventDefault();
+      const atTop = Math.abs(docTop(secs[i]) - window.scrollY) < 2;
+      if (atTop && st[i].level > 1) setLevel(i, 1);
+      else if (st[i].level === 1) setLevel(i, M.defaultLevel === 1 ? 3 : M.defaultLevel);
+      scrollToFile(i);
+    }));
     filter.addEventListener('input', applyFilter);
+    allBtn?.addEventListener('click', (e) => { e.preventDefault(); toggleAll(); allBtn.blur(); });
     document.getElementById('helpbtn').addEventListener('click', (e) => { e.preventDefault(); help.hidden = false; });
     help.addEventListener('click', (e) => { if (e.target === help) help.hidden = true; });
     document.addEventListener('keydown', onKey);
 
     let raf = 0;
-    window.addEventListener('scroll', () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; spy(); }); }, { passive: true });
+    window.addEventListener('scroll', () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; spy(); mmDraw(); }); }, { passive: true });
     let rt = 0;
     window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(onResize, 100); });
 

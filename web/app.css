@@ -7,6 +7,7 @@
   --gp: 10px;   /* horizontal padding of each line-number cell */
   --cpr: 8px;   /* code right padding (left padding is 2ch) */
   --side: 300px;
+  --mm: 110px;  /* minimap width */
 
   --bg: #ffffff; --bg2: #f6f8fa; --fg: #1f2328; --muted: #656d76; --border: #d1d9e0;
   --add-bg: #e6ffec; --add-gut: #ccffd8; --add-fg: #1a7f37;
@@ -45,10 +46,16 @@ kbd { font: 11px var(--mono); border: 1px solid var(--border); border-bottom-wid
 #side .label { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #side .tot { color: var(--muted); font-size: 12px; margin-top: 2px; }
 #side .tot a { color: var(--muted); }
+#allbtn { margin-top: 8px; font: inherit; font-size: 12px; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+#allbtn:hover { border-color: var(--muted); }
 #filter { display: block; box-sizing: border-box; width: calc(100% - 24px); margin: 4px 12px 8px; padding: 4px 8px; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
 .commits { margin: 0 12px 8px; font-size: 12px; }
-.commits summary { color: var(--muted); cursor: pointer; }
-.commits .cm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 1px 0; }
+.commits summary { color: var(--muted); cursor: pointer; margin-bottom: 2px; }
+.commits .cm { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 2px 6px; margin: 0 -6px; border-radius: 4px; color: inherit; text-decoration: none; border-left: 2px solid transparent; }
+.commits .cm:hover { background: var(--bg); }
+.commits .cm.sel { background: var(--cur-bg); border-left-color: var(--cur); border-radius: 0 4px 4px 0; }
+.commits .cm.all, .commits .cm.wt { color: var(--muted); font-style: italic; }
+.commits .cm.sel.all, .commits .cm.sel.wt { color: var(--fg); }
 .commits code { color: var(--muted); font: 11px var(--mono); }
 #tree .dir { color: var(--muted); font-size: 11px; padding: 6px 12px 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
 #tree .fi { display: grid; grid-template-columns: 12px 1fr auto; grid-template-rows: auto 2px; column-gap: 6px; align-items: center; padding: 2px 12px 2px 16px; color: inherit; text-decoration: none; border-left: 2px solid transparent; }
@@ -67,7 +74,7 @@ kbd { font: 11px var(--mono); border: 1px solid var(--border); border-bottom-wid
 .hidden { display: none !important; }
 
 /* Main column */
-#main { margin-left: var(--side); min-width: 0; padding-bottom: 100vh; } /* lets the last file scroll to the top */
+#main { margin-left: var(--side); margin-right: var(--mm); min-width: 0; padding-bottom: 100vh; } /* lets the last file scroll to the top */
 .empty { padding: 40px; color: var(--muted); }
 section.file { border-bottom: 1px solid var(--border); }
 .fh {
@@ -79,7 +86,7 @@ section.file { border-bottom: 1px solid var(--border); }
 .fh .tw { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0; width: 14px; font-size: 12px; }
 .lv1 .fh .tw { transform: rotate(-90deg); }
 .fh .st { font: 11px var(--mono); color: var(--muted); border: 1px solid var(--border); border-radius: 3px; padding: 0 3px; }
-.fh .path { font-family: var(--mono); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1 1 auto; }
+.fh .path { font-family: var(--mono); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1 1 auto; cursor: pointer; }
 .fh .pd, .fh .from { color: var(--muted); }
 .fh .cnt { font: 12px var(--mono); }
 .fh .vw { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 4px; cursor: pointer; }
@@ -124,3 +131,9 @@ section.cur .fh { box-shadow: inset 3px 0 0 var(--cur); }
 #help .card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; max-width: calc(100vw - 32px); }
 #help h2 { margin: 0 0 8px; font-size: 15px; }
 #help td { padding: 3px 12px 3px 0; }
+
+#minimap { position: fixed; top: 0; right: 0; width: var(--mm); height: 100vh; box-sizing: border-box; border-left: 1px solid var(--border); background: var(--bg); z-index: 3; cursor: pointer; touch-action: none; }
+@media (max-width: 800px) {
+  #minimap { display: none; }
+  #main { margin-right: 0; }
+}

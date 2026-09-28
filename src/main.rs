@@ -13,15 +13,30 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Local diff viewer for large changes.
-///
-/// Targets: (none) working tree + unpushed commits · b [name] branch ·
-/// c <sha> commit · l [n] last n commits · <a>..<b> range.
-/// Bare branch names and commit shas are accepted too.
+const TARGETS: &str = "\
+Targets:
+  (none)          Working tree + unpushed commits vs the default branch
+  b [name]        Branch (default: current) vs the default branch
+  c <sha>         One commit
+  l [n]           Last n commits (default: 1)
+  <a>..<b>        Range; <a>...<b> diffs from their merge-base
+  <branch|sha>    Bare branch names and commit shas work too
+  p <n>, s        GitHub PR, since-last-review (coming in M3)
+
+Examples:
+  gv                      review what the agent just did
+  gv b feat/x --base develop
+  gv l 3 --full
+  gv -C ~/code/app main..HEAD
+
+In the browser, press ? for keyboard shortcuts.";
+
+/// Local diff viewer for large, AI-generated changes.
 #[derive(Parser)]
-#[command(name = "gv", version)]
+#[command(name = "gv", version, after_help = TARGETS)]
 struct Cli {
-    /// What to review (see above).
+    /// What to review (see Targets below).
+    #[arg(value_name = "TARGET")]
     target: Vec<String>,
     /// Port to bind on 127.0.0.1 (default: random).
     #[arg(long)]
