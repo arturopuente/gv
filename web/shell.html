@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gv · {{ repo }}</title>
+<link rel="stylesheet" href="/a/app.css">
+<link rel="stylesheet" href="/theme.css">
+</head>
+<body>
+<aside id="side">
+  <div class="top">
+    <div class="repo">{{ repo }}</div>
+    <div class="label" title="{{ label }}">{{ label }}</div>
+    <div class="tot">{{ files|length }} files · <span class="add">+{{ total_add }}</span> <span class="del">−{{ total_del }}</span> · <a href="#" id="helpbtn">? keys</a></div>
+  </div>
+  <input id="filter" type="search" placeholder="Filter files  /" autocomplete="off" spellcheck="false">
+  {% if commits %}
+  <details class="commits"{% if commits|length <= 3 %} open{% endif %}>
+    <summary>{{ commits|length }} commit{% if commits|length != 1 %}s{% endif %}</summary>
+    {% for c in commits %}<div class="cm" title="{{ c.author }}"><code>{{ c.short }}</code> {{ c.subject }}</div>{% endfor %}
+  </details>
+  {% endif %}
+  <nav id="tree">
+    {% for f in files %}
+    {% if loop.first or loop.previtem.dir != f.dir %}<div class="dir">{{ f.dir or "./" }}</div>{% endif %}
+    <a class="fi" href="#f{{ f.i }}" data-i="{{ f.i }}" title="{{ f.path }}">
+      <span class="vs vs-{{ f.viewed }}"></span>
+      <span class="nm st-{{ f.status }}">{{ f.name }}</span>
+      <span class="cnt">{% if f.add %}<span class="add">+{{ f.add }}</span>{% endif %}{% if f.del %} <span class="del">−{{ f.del }}</span>{% endif %}</span>
+      <span class="bar"><i class="ba"></i><i class="bd"></i></span>
+    </a>
+    {% endfor %}
+  </nav>
+</aside>
+
+<main id="main">
+  {% if not files %}<div class="empty">No changes.</div>{% endif %}
+  {% for f in files %}
+  <section class="file" id="f{{ f.i }}" data-i="{{ f.i }}" style="--gd:{{ f.gd }}">
+    <header class="fh">
+      <button class="tw" tabindex="-1" aria-label="Collapse or expand">▾</button>
+      <span class="st st-{{ f.status }}">{{ f.status }}</span>
+      <span class="path">{% if f.dir %}<span class="pd">{{ f.dir }}/</span>{% endif %}<b>{{ f.name }}</b>{% if f.old_path %} <span class="from">← {{ f.old_path }}</span>{% endif %}</span>
+      <span class="cnt"><span class="add">+{{ f.add }}</span> <span class="del">−{{ f.del }}</span></span>
+      <label class="vw"><input type="checkbox" tabindex="-1"{% if f.viewed == "v" %} checked{% endif %}> Viewed</label>
+    </header>
+    <div class="body"></div>
+  </section>
+  {% endfor %}
+</main>
+
+<div id="help" hidden>
+  <div class="card">
+    <h2>Keys</h2>
+    <table>
+      <tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>next / prev hunk</td></tr>
+      <tr><td><kbd>J</kbd> <kbd>K</kbd></td><td>next / prev file</td></tr>
+      <tr><td><kbd>n</kbd> <kbd>N</kbd></td><td>next / prev unviewed file</td></tr>
+      <tr><td><kbd>v</kbd></td><td>toggle viewed (collapses the file)</td></tr>
+      <tr><td><kbd>V</kbd></td><td>mark viewed, go to next unviewed</td></tr>
+      <tr><td><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></td><td>current file: collapsed / hunk headers / everything</td></tr>
+      <tr><td><kbd>Alt</kbd>+<kbd>1</kbd>–<kbd>3</kbd></td><td>same, all files</td></tr>
+      <tr><td><kbd>g</kbd> <kbd>g</kbd> / <kbd>G</kbd></td><td>top / bottom</td></tr>
+      <tr><td><kbd>/</kbd></td><td>filter files</td></tr>
+      <tr><td><kbd>r</kbd></td><td>re-snapshot (re-read the repo)</td></tr>
+      <tr><td><kbd>?</kbd></td><td>this help</td></tr>
+    </table>
+  </div>
+</div>
+
+<span id="probe" aria-hidden="true">0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</span>
+<script id="model" type="application/json">{{ model_json|safe }}</script>
+<script src="/a/app.js"></script>
+</body>
+</html>
