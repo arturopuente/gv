@@ -837,17 +837,60 @@
     }
     document.getElementById('finish').addEventListener('click', openDialog);
     document.getElementById('rvcancel').addEventListener('click', () => { dlg.hidden = true; });
-    dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.hidden = true; });
-    dlg.addEventListener('keydown', (e) => { if (e.key === 'Escape') { dlg.hidden = true; e.stopPropagation(); } });
+    // Submitting waits 3 s so a slip can be undone; Escape cancels it too.
+    let countdown = null;
+    const btns = dlg.querySelector('.rvbtns'), wait = document.getElementById('rvwait');
+    const lock = (on) => {
+      btns.hidden = on;
+      wait.hidden = !on;
+      sum.disabled = on;
+      dlg.querySelectorAll('input[name=verdict]').forEach((r) => { r.disabled = on; });
+    };
+    function cancelSubmit() {
+      clearInterval(countdown);
+      countdown = null;
+      lock(false);
+      document.getElementById('rvsubmit').focus();
+    }
+    dlg.addEventListener('click', (e) => { if (e.target === dlg && !countdown) dlg.hidden = true; });
+    // Escape wherever focus is (clicking the card's text leaves it on <body>);
+    // capture phase, so it wins over the textarea's blur-on-Escape.
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || dlg.hidden) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (countdown) cancelSubmit(); else dlg.hidden = true;
+    }, true);
+    document.getElementById('rvundo').addEventListener('click', cancelSubmit);
 
-    document.getElementById('rvsubmit').addEventListener('click', async () => {
+    document.getElementById('rvsubmit').addEventListener('click', () => {
+      if (countdown) return;
+      document.getElementById('rverr').textContent = '';
+      let left = 3;
+      const secs = document.getElementById('rvsecs');
+      secs.textContent = left;
+      lock(true);
+      document.getElementById('rvundo').focus();
+      countdown = setInterval(() => {
+        left -= 1;
+        secs.textContent = left;
+        if (left > 0) return;
+        clearInterval(countdown);
+        submitNow();
+      }, 1000);
+    });
+
+    async function submitNow() {
       const verdict = dlg.querySelector('input[name=verdict]:checked').value;
-      const btn = document.getElementById('rvsubmit');
-      btn.disabled = true;
-      const res = await post('/review/submit', { verdict, summary: sum.value });
-      if (!res.ok) {
-        btn.disabled = false;
-        document.getElementById('rverr').textContent = `Submit failed: ${await res.text()}`;
+      document.getElementById('rvundo').disabled = true; // too late to cancel
+      let res;
+      try {
+        res = await post('/review/submit', { verdict, summary: sum.value });
+        if (!res.ok) throw new Error(await res.text());
+      } catch (e) {
+        document.getElementById('rvundo').disabled = false;
+        cancelSubmit();
+        document.getElementById('rverr').textContent = `Submit failed: ${e.message}`;
         return;
       }
       const out = await res.json();
@@ -855,7 +898,10 @@
       dlg.hidden = true;
       document.getElementById('rvfile').textContent = `Review ${out.number} · saved to ${out.file}`;
       document.getElementById('rvdone').hidden = false;
-    });
+      // Browsers only let a page close a tab with no back history; if this
+      // one refuses, the "Review submitted" card stays up instead.
+      window.close();
+    }
     updateCounts();
   }
 

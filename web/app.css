@@ -230,4 +230,7 @@ section.cur .fh { box-shadow: inset 3px 0 0 var(--cur); }
 .verdict { border: 0; padding: 0; margin: 8px 0; display: grid; gap: 4px; }
 .verdict span { color: var(--muted); font-size: 12px; }
 #rverr { color: var(--del-fg); font-size: 12px; margin-top: 6px; }
+.rvbtns[hidden] { display: none; }
+.rvwait span { margin-right: auto; color: var(--muted); }
+.rvwait b { color: var(--fg); font-variant-numeric: tabular-nums; }
 .muted { color: var(--muted); font-size: 12px; }
